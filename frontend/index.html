@@ -1,0 +1,2213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Voice Tutor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <!-- Excalidraw -->
+    <script src="https://unpkg.com/@excalidraw/excalidraw@0.17.6/dist/excalidraw.production.min.js"></script>
+    <!-- Babel (in-browser JSX) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- LiveKit -->
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <!--
+        PHASE 2 — Layout Engine
+        Dagre handles vertical / horizontal / tree layouts.
+        Custom functions handle circular, radial (mind-map), and timeline.
+    -->
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <!-- Recharts for interactive widgets -->
+    <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+    <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+    <style>
+        :root {
+            --bg-color:      #0f172a;
+            --card-bg:       rgba(30, 41, 59, 0.7);
+            --primary:       #10b981;
+            --primary-hover: #059669;
+            --text-main:     #f8fafc;
+            --text-dim:      #94a3b8;
+            --border:        rgba(255, 255, 255, 0.1);
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-color);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.9);
+            z-index: 10;
+        }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 260px 1fr 300px;
+            gap: 1rem;
+            padding: 1rem;
+            overflow: hidden;
+        }
+
+        /* ── Right column: chat stacked above widget panel ─────────────── */
+        .right-column {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        /* Default: chat fills entire column */
+        .chat-panel {
+            flex: 1 1 auto;
+            min-height: 0;
+        }
+
+        /* When widget is active: 55/45 proportional split.
+           Both sides get a concrete percentage-based height so
+           #widget-body's overflow:hidden clips at the right boundary,
+           and Recharts can measure a real pixel height.              */
+        .right-column.widget-active .chat-panel {
+            flex: 0 0 55%;
+            min-height: 0;
+        }
+        .right-column.widget-active #widget-panel {
+            flex: 0 0 calc(45% - 1rem);
+            min-height: 0;
+        }
+
+        /* ── Widget panel ───────────────────────────────────────────────── */
+        #widget-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 1rem;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            /* sizing controlled by .widget-active rules — no flex-shrink:0 */
+        }
+        #widget-panel.active { display: flex; }
+
+        #widget-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.6rem 0.9rem;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+        #widget-header span { color: #10b981; }
+        #widget-close {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            padding: 0 0.2rem;
+        }
+        #widget-close:hover { color: #fff; }
+        #widget-body {
+            flex: 1;
+            overflow: hidden;
+            padding: 0.5rem;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #widget-root {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ── Slider styles inside widget ────────────────────────────────── */
+        .widget-slider-row {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            margin-bottom: 0.55rem;
+        }
+        .widget-slider-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+        }
+        .widget-slider-label em {
+            font-style: normal;
+            color: #10b981;
+            font-weight: 700;
+        }
+        input[type=range].widget-range {
+            width: 100%;
+            accent-color: #10b981;
+            cursor: pointer;
+        }
+
+        .panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 1rem;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .controls-panel { padding: 1.5rem; gap: 1.25rem; }
+        .canvas-panel   { position: relative; background: #1e1e1e; border-radius: 1rem; }
+        .chat-panel     {}
+
+        .status-card {
+            background: rgba(255,255,255,0.03);
+            border-radius: 0.75rem;
+            padding: 1rem;
+            border: 1px solid var(--border);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 0.875rem;
+            border-radius: 0.5rem;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-bottom: 0.5rem;
+        }
+        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary:disabled { background: #334155; cursor: not-allowed; }
+        .btn-primary:not(:disabled):hover { background: var(--primary-hover); }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: #fff; }
+        .btn-outline:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        #speaking-indicator { display: none; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+        /* ── Waveform visualiser ───────────────────────────────────────── */
+        #waveform-wrap {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 0.65rem 0.75rem 0.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        #waveform-label {
+            font-size: 0.65rem;
+            font-weight: 700;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        #waveform-label::before {
+            content: '';
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #334155;
+            transition: background 0.4s;
+        }
+        #waveform-wrap.live #waveform-label::before { background: #10b981; box-shadow: 0 0 6px #10b981; }
+        #waveform-wrap.live #waveform-label { color: #6ee7b7; }
+        #waveform-canvas { width: 100%; height: 44px; display: block; }
+
+        /* ── Lesson progress bar ───────────────────────────────────────── */
+        #progress-wrap {
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 5px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 1rem 1rem 0 0;
+            z-index: 20;
+            overflow: hidden;
+        }
+        #progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #10b981 0%, #6ee7b7 100%);
+            transition: width 0.55s cubic-bezier(0.4,0,0.2,1);
+        }
+        #progress-label {
+            position: absolute;
+            top: 0.6rem; right: 0.75rem;
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            color: rgba(255,255,255,0.45);
+            pointer-events: none;
+            z-index: 21;
+        }
+
+        /* ── Node type legend ──────────────────────────────────────────── */
+        #node-legend {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 0.65rem 0.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+        }
+        #node-legend-title {
+            font-size: 0.65rem;
+            font-weight: 700;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-bottom: 0.1rem;
+        }
+        .legend-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.73rem;
+            color: var(--text-dim);
+        }
+        .legend-swatch {
+            width: 11px; height: 11px;
+            border-radius: 3px;
+            border: 1.5px solid;
+            flex-shrink: 0;
+        }
+
+        #chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .message {
+            padding: 0.75rem;
+            border-radius: 0.75rem;
+            font-size: 0.875rem;
+            max-width: 85%;
+            word-break: break-word;
+        }
+        .message.user  { align-self: flex-end; background: #334155; color: #fff; }
+        .message.agent {
+            align-self: flex-start;
+            background: rgba(16,185,129,0.1);
+            border: 1px solid rgba(16,185,129,0.2);
+            color: #d1fae5;
+        }
+
+        .chat-input-area {
+            padding: 1rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 0.5rem;
+        }
+        #chat-input {
+            flex: 1;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--border);
+            color: #fff;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            outline: none;
+        }
+        .send-btn {
+            background: var(--primary);
+            border: none;
+            border-radius: 0.5rem;
+            padding: 0 1rem;
+            color: #fff;
+            cursor: pointer;
+        }
+        .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .canvas-overlay {
+            position: absolute;
+            top: 0.75rem; left: 0.75rem;
+            background: rgba(15,23,42,0.8);
+            padding: 0.3rem 0.7rem;
+            border-radius: 0.5rem;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            color: #fff;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #excalidraw-root { width: 100%; height: 100%; }
+
+        /* ── Thinking indicator ────────────────────────────────────────── */
+        .thinking-bubble {
+            align-self: flex-start;
+            background: rgba(16,185,129,0.08);
+            border: 1px solid rgba(16,185,129,0.2);
+            border-radius: 0.75rem;
+            padding: 0.65rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .thinking-bubble span {
+            font-size: 0.75rem;
+            color: #6ee7b7;
+            font-style: italic;
+        }
+        .thinking-dots {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+        .thinking-dots i {
+            display: block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: thinking-bounce 1.2s ease-in-out infinite;
+        }
+        .thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
+        .thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes thinking-bounce {
+            0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+            40%            { transform: translateY(-5px); opacity: 1; }
+        }
+
+        /* ── Auto-pan status badge ─────────────────────────────────────── */
+        #autopan-badge {
+            position: absolute;
+            bottom: 0.75rem;
+            right: 0.75rem;
+            background: rgba(15,23,42,0.85);
+            border: 1px solid rgba(16,185,129,0.35);
+            border-radius: 0.5rem;
+            padding: 0.25rem 0.6rem;
+            font-size: 0.65rem;
+            color: #6ee7b7;
+            pointer-events: none;
+            z-index: 10;
+            opacity: 0;
+            transition: opacity 0.4s;
+        }
+        #autopan-badge.visible { opacity: 1; }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <div style="font-weight:700;font-size:1.1rem;color:var(--primary);">🎨 AI Voice Tutor</div>
+    <div id="status-text">Disconnected</div>
+</header>
+
+<main>
+    <aside class="panel controls-panel">
+        <div class="status-card">
+            <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.5rem;">Connection Status</div>
+            <div id="connection-state" style="font-weight:600;">Ready to Join</div>
+        </div>
+        <div>
+            <button id="connectBtn"    class="btn btn-primary">Join Session</button>
+            <button id="disconnectBtn" class="btn btn-outline" disabled>End Session</button>
+        </div>
+
+        <!-- Live audio waveform -->
+        <div id="waveform-wrap">
+            <div id="waveform-label">Agent audio</div>
+            <canvas id="waveform-canvas" width="220" height="44"></canvas>
+        </div>
+
+        <!-- Node colour legend -->
+        <div id="node-legend">
+            <div id="node-legend-title">Diagram key</div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#1e3a5f;border-color:#60a5fa;"></div>
+                Concept
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#064e3b;border-color:#34d399;border-style:dashed;"></div>
+                Process / Step
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#422006;border-color:#fbbf24;"></div>
+                Decision
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#2e1065;border-color:#c084fc;border-radius:50%;"></div>
+                Terminal
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#042f2e;border-color:#2dd4bf;border-style:dotted;"></div>
+                Data
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#451a03;border-color:#fb923c;"></div>
+                Milestone
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#052e16;border-color:#4ade80;"></div>
+                State
+            </div>
+            <div class="legend-row">
+                <div class="legend-swatch" style="background:#500724;border-color:#f9a8d4;border-radius:50%;"></div>
+                Thought
+            </div>
+        </div>
+
+        <div id="speaking-indicator">🔊 Agent is speaking…</div>
+    </aside>
+
+    <!-- PHASE 8: pure renderer — zero semantic logic -->
+    <section class="panel canvas-panel">
+        <div id="progress-wrap"><div id="progress-bar"></div></div>
+        <div id="progress-label"></div>
+        <div class="canvas-overlay">WHITEBOARD</div>
+        <div id="autopan-badge">📍 Following node…</div>
+        <div id="excalidraw-root"></div>
+    </section>
+
+    <div class="right-column">
+        <aside class="panel chat-panel">
+            <div style="padding:1rem;border-bottom:1px solid var(--border);font-weight:700;">Session Chat</div>
+            <div id="chat-messages"></div>
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" placeholder="Ask something…" disabled>
+                <button id="sendBtn" class="send-btn" disabled>Send</button>
+            </div>
+        </aside>
+
+        <!-- Widget panel — hidden until LLM calls show_widget -->
+        <div id="widget-panel">
+            <div id="widget-header">
+                <span id="widget-title">Interactive Explorer</span>
+                <button id="widget-close" title="Close widget">✕</button>
+            </div>
+            <div id="widget-body">
+                <div id="widget-root"></div>
+            </div>
+        </div>
+    </div>
+</main>
+
+
+<!-- =============================================================
+     Excalidraw mount
+     ============================================================= -->
+<script type="text/babel">
+const App = () => {
+    const [excalidrawAPI, setExcalidrawAPI] = React.useState(null);
+
+    React.useEffect(() => {
+        if (excalidrawAPI) {
+            window.excalidrawAPI = excalidrawAPI;
+            excalidrawAPI.updateScene({ elements: [] });
+        }
+    }, [excalidrawAPI]);
+
+    return (
+        <div style={{ height: "100%" }}>
+            <ExcalidrawLib.Excalidraw
+                excalidrawAPI={(api) => setExcalidrawAPI(api)}
+                theme="dark"
+                viewModeEnabled={false}
+                initialData={{ appState: { viewBackgroundColor: "#1e1e1e" } }}
+            />
+        </div>
+    );
+};
+
+ReactDOM.createRoot(document.getElementById("excalidraw-root")).render(<App />);
+</script>
+
+
+<!-- =============================================================
+     PHASE 2 — Layout Engine
+     Supports: vertical, horizontal, circular, radial (mind-map), timeline
+     ============================================================= -->
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 2 — Layout Engine
+//
+// ROOT FIX: Pre-measure every node's ACTUAL rendered pixel dimensions before
+// running Dagre. Previously Dagre received a fixed NODE_H=70 for every node,
+// but nodeToElements() later grew shapes to fit their text — making positions
+// stale and causing overlaps. Now the layout engine measures first, Dagre gets
+// correct sizes, and nodeToElements receives the exact same measured dimensions.
+// ─────────────────────────────────────────────────────────────────────────────
+const LayoutEngine = (() => {
+
+    // ── Shared constants ────────────────────────────────────────────────────
+    const NODE_W     = 200;   // wider nodes = more room for text
+    const MIN_NODE_H = 60;    // minimum height when text is short
+    const FONT_SIZE  = 15;    // must match nodeToElements FONT_SIZE
+    const LINE_H     = FONT_SIZE * 1.35;
+    const PADDING    = 20;    // must match nodeToElements PADDING
+    // Extra safety margin so canvas-measured widths never overflow Excalidraw's
+    // slightly different font metrics (Virgil vs browser canvas default).
+    const WRAP_SAFETY = 0.82; // wrap at 82% of textMaxW so there's headroom
+
+    const RANK_SEP  = 80;
+    const NODE_SEP  = 60;
+
+    // ── Shared text measuring canvas (created once, reused) ─────────────────
+    const _measCanvas = document.createElement("canvas");
+    const _measCtx    = _measCanvas.getContext("2d");
+
+    // Returns the actual {width, height} a node will occupy after text wrapping.
+    // This is THE authoritative sizing function — used by both the layout engine
+    // and nodeToElements so they always agree.
+    //
+    // ICON LAYOUT (vector SVG, inline left of label):
+    //   When a node has icon_name, we reserve ICON_SLOT px on the left of the
+    //   text area. The label wraps into the remaining width.
+    //   ICON_SLOT = ICON_SIZE + ICON_GAP  (both defined in nodeToElements too).
+    const ICON_SIZE = 20;   // SVG icon rendered at 20×20 px inside node
+    const ICON_GAP  = 6;    // gap between icon and label text
+    const ICON_SLOT = ICON_SIZE + ICON_GAP;
+
+    function measureNode(node) {
+        const shape   = node.shape || "rectangle";
+        const hasIcon = !!(node.icon);   // node.icon stores the icon_name slug
+
+        let w = NODE_W;
+
+        // Available text width inside the shape geometry.
+        let textMaxW = w - PADDING * 2;
+        if (shape === "ellipse")  textMaxW = w * 0.55;
+        if (shape === "diamond")  textMaxW = w / 2 - PADDING;
+
+        // When an icon is present, the label wraps into a narrower column.
+        const labelMaxW = hasIcon ? textMaxW - ICON_SLOT : textMaxW;
+
+        // Apply safety margin to avoid font-metric mismatches
+        const wrapW = labelMaxW * WRAP_SAFETY;
+
+        _measCtx.font = `${FONT_SIZE}px sans-serif`;
+        const label    = String(node.label || "");
+        const rawLines = label.replace(/\\n/g, "\n").split("\n").map(l => l.trim());
+        let lineCount = 0;
+        for (const raw of rawLines) {
+            if (!raw) { lineCount++; continue; }
+            const words = raw.split(" ");
+            let cur = words[0] || "";
+            for (let i = 1; i < words.length; i++) {
+                if (_measCtx.measureText(cur + " " + words[i]).width <= wrapW) {
+                    cur += " " + words[i];
+                } else {
+                    lineCount++;
+                    cur = words[i];
+                }
+            }
+            lineCount++;
+        }
+
+        const textH = lineCount * LINE_H;
+        // When icon is present, node height must also accommodate the icon itself
+        const contentH = hasIcon ? Math.max(textH, ICON_SIZE) : textH;
+
+        let hMul = 1;
+        if (shape === "text")    hMul = 1;
+        if (shape === "ellipse") hMul = 1.9;
+        if (shape === "diamond") hMul = 2;
+
+        const minH   = contentH * hMul + PADDING * 2;
+        const finalH = Math.max(MIN_NODE_H, minH);
+
+        return { width: w, height: finalH, textMaxW, wrapW, lineCount };
+    }
+
+    // ── Dagre (vertical / horizontal / tree) ────────────────────────────────
+    function runDagre(nodes, edges, rankdir) {
+        const g = new dagre.graphlib.Graph();
+        g.setDefaultEdgeLabel(() => ({}));
+        g.setGraph({ rankdir, ranksep: RANK_SEP, nodesep: NODE_SEP,
+                     marginx: 40, marginy: 40 });
+
+        // Pre-measure every node so Dagre knows actual sizes
+        const measured = {};
+        for (const [id, node] of Object.entries(nodes)) {
+            const m = measureNode(node);
+            measured[id] = m;
+            g.setNode(id, { width: m.width, height: m.height });
+        }
+        for (const [, edge] of Object.entries(edges)) {
+            if (nodes[edge.source] && nodes[edge.target]) {
+                g.setEdge(edge.source, edge.target);
+            }
+        }
+
+        dagre.layout(g);
+
+        const positions = {};
+        g.nodes().forEach(id => {
+            const n = g.node(id);
+            const m = measured[id] || { width: NODE_W, height: MIN_NODE_H };
+            positions[id] = {
+                x: n.x - m.width  / 2,
+                y: n.y - m.height / 2,
+                width:   m.width,
+                height:  m.height,
+                cx:      n.x,
+                cy:      n.y,
+                // Pass pre-measured wrap params so nodeToElements uses same values
+                textMaxW: m.textMaxW,
+                wrapW:    m.wrapW,
+            };
+        });
+        return positions;
+    }
+
+    // ── Circular (cycles) ───────────────────────────────────────────────────
+    function computeCircular(nodes) {
+        const entries = Object.entries(nodes);
+        if (entries.length === 0) return {};
+
+        const measured = {};
+        let maxW = NODE_W, maxH = MIN_NODE_H;
+        for (const [id, node] of entries) {
+            const m = measureNode(node);
+            measured[id] = m;
+            maxW = Math.max(maxW, m.width);
+            maxH = Math.max(maxH, m.height);
+        }
+
+        const count = entries.length;
+        const circumference = count * (maxW + NODE_SEP);
+        const radius = Math.max(220, circumference / (2 * Math.PI));
+        const canvasCX = radius + maxW;
+        const canvasCY = radius + maxH;
+
+        const positions = {};
+        entries.forEach(([id], i) => {
+            const m = measured[id];
+            const angle = (i / count) * 2 * Math.PI - Math.PI / 2;
+            const px = canvasCX + radius * Math.cos(angle);
+            const py = canvasCY + radius * Math.sin(angle);
+            positions[id] = {
+                x: px - m.width / 2, y: py - m.height / 2,
+                width: m.width, height: m.height, cx: px, cy: py,
+                textMaxW: m.textMaxW, wrapW: m.wrapW,
+            };
+        });
+        return positions;
+    }
+
+    // ── Radial / mind-map ───────────────────────────────────────────────────
+    function computeRadial(nodes) {
+        const entries = Object.entries(nodes);
+        if (entries.length === 0) return {};
+
+        const measured = {};
+        for (const [id, node] of entries) measured[id] = measureNode(node);
+
+        const rootId   = entries[0][0];
+        const children = entries.slice(1);
+        const count    = children.length;
+        const CX = 500, CY = 400;
+        const radius = Math.max(260, count * (NODE_W + NODE_SEP) / (2 * Math.PI));
+
+        const positions = {};
+        const rm = measured[rootId];
+        positions[rootId] = {
+            x: CX - rm.width / 2, y: CY - rm.height / 2,
+            width: rm.width, height: rm.height, cx: CX, cy: CY,
+            textMaxW: rm.textMaxW, wrapW: rm.wrapW,
+        };
+        children.forEach(([id], i) => {
+            const m = measured[id];
+            const angle = (i / count) * 2 * Math.PI - Math.PI / 2;
+            const px = CX + radius * Math.cos(angle);
+            const py = CY + radius * Math.sin(angle);
+            positions[id] = {
+                x: px - m.width / 2, y: py - m.height / 2,
+                width: m.width, height: m.height, cx: px, cy: py,
+                textMaxW: m.textMaxW, wrapW: m.wrapW,
+            };
+        });
+        return positions;
+    }
+
+    // ── Timeline ────────────────────────────────────────────────────────────
+    function computeTimeline(nodes) {
+        const entries = Object.entries(nodes);
+        if (entries.length === 0) return {};
+
+        const measured = {};
+        let maxH = MIN_NODE_H;
+        for (const [id, node] of entries) {
+            const m = measureNode(node);
+            measured[id] = m;
+            maxH = Math.max(maxH, m.height);
+        }
+
+        const STEP_X = NODE_W + NODE_SEP + 40;
+        const BASE_Y = 300;
+        const positions = {};
+        entries.forEach(([id], i) => {
+            const m = measured[id];
+            const px = 80 + i * STEP_X + m.width / 2;
+            positions[id] = {
+                x: px - m.width / 2, y: BASE_Y - m.height / 2,
+                width: m.width, height: m.height, cx: px, cy: BASE_Y,
+                textMaxW: m.textMaxW, wrapW: m.wrapW,
+            };
+        });
+        return positions;
+    }
+
+    return {
+        compute(scene, layoutHint = "vertical") {
+            const { nodes = {}, edges = {} } = scene;
+            switch (layoutHint) {
+                case "circular":   return computeCircular(nodes);
+                case "radial":     return computeRadial(nodes);
+                case "timeline":   return computeTimeline(nodes);
+                case "horizontal": return runDagre(nodes, edges, "LR");
+                default:           return runDagre(nodes, edges, "TB");
+            }
+        },
+        // Exposed so nodeToElements can reuse the same wrap width
+        measureNode,
+    };
+})();
+</script>
+
+
+<!-- =============================================================
+     PHASE 3/4/6/8 — Renderer Adapter + Patch Processor + ACK
+     Frontend responsibilities ONLY:
+       1. Receive scene_patch
+       2. Run LayoutEngine to compute node positions
+       3. Convert semantic nodes/edges → Excalidraw elements
+       4. Apply atomically via updateScene
+       5. Handle animation / highlight / dim / reveal ops
+       6. Send scene_ack back to backend
+     ============================================================= -->
+
+<!-- =============================================================
+     WIDGET ENGINE
+     Receives widget_patch from the backend and renders an
+     interactive Recharts widget into #widget-root.
+     Sends widget_interaction back when sliders change.
+     ============================================================= -->
+<script type="text/babel">
+// ── Widget state ─────────────────────────────────────────────────────────────
+// One active widget at a time.  _widgetConfig holds the current spec.
+let _widgetConfig = null;
+
+// ── Widget components ─────────────────────────────────────────────────────────
+const {
+    LineChart, Line, BarChart, Bar, ScatterChart, Scatter,
+    XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+    ReferenceLine, Label,
+} = Recharts;
+
+const { useState, useEffect, useCallback, useRef } = React;
+
+// Safely evaluate a formula string with given variable bindings.
+// Returns null on error so the chart just shows no data point.
+function evalFormula(formula, vars) {
+    try {
+        // Build a tiny scope: const {P,R,T,...} = vars; return <formula>;
+        const keys   = Object.keys(vars).join(",");
+        const values = Object.keys(vars).map(k => vars[k]);
+        // eslint-disable-next-line no-new-func
+        return new Function(...Object.keys(vars), `return (${formula});`)(...values);
+    } catch (_) {
+        return null;
+    }
+}
+
+// Generate series data by sweeping the x-axis variable across its range.
+function generateSeries(config, currentVars) {
+    const { x_var, variables, formula, points = 60 } = config;
+    const xSpec = variables.find(v => v.name === x_var);
+    if (!xSpec) return [];
+
+    const step = (xSpec.max - xSpec.min) / (points - 1);
+    const series = [];
+    for (let i = 0; i < points; i++) {
+        const x = xSpec.min + i * step;
+        const vars = { ...currentVars, [x_var]: x };
+        const y = evalFormula(formula, vars);
+        if (y !== null && isFinite(y)) {
+            series.push({ x: parseFloat(x.toFixed(4)), y: parseFloat(y.toFixed(4)) });
+        }
+    }
+    return series;
+}
+
+// ── LineChartWidget ───────────────────────────────────────────────────────────
+function LineChartWidget({ config }) {
+    const initVars = {};
+    config.variables.forEach(v => { initVars[v.name] = v.default ?? v.min; });
+    const [vars,       setVars]       = useState(initVars);
+    const [chartSize,  setChartSize]  = useState({ width: 0, height: 0 });
+    const chartWrapRef = useRef(null);
+
+    // Self-measure: watch the chart wrapper div with ResizeObserver.
+    // This fires whenever the panel gets real dimensions — immune to timing.
+    useEffect(() => {
+        const el = chartWrapRef.current;
+        if (!el) return;
+        const ro = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width > 0 && height > 0) {
+                    setChartSize({ width: Math.floor(width), height: Math.floor(height) });
+                }
+            }
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
+    // Notify backend on every slider change
+    const notify = useCallback((newVars) => {
+        if (!window._lkRoom) return;
+        window._lkRoom.localParticipant.publishData(
+            new TextEncoder().encode(JSON.stringify({
+                type: "widget_interaction", widget: config.id, vars: newVars,
+            })), { reliable: true }
+        );
+    }, [config.id]);
+
+    const handleChange = (name, val) => {
+        const newVars = { ...vars, [name]: parseFloat(val) };
+        setVars(newVars);
+        notify(newVars);
+    };
+
+    const data = generateSeries(config, vars);
+    const sliderVars = config.variables.filter(v => v.name !== config.x_var);
+
+    return (
+        <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
+            {/* Sliders */}
+            <div style={{ flexShrink: 0 }}>
+                {sliderVars.map(v => (
+                    <div key={v.name} className="widget-slider-row">
+                        <div className="widget-slider-label">
+                            <span>{v.label || v.name}</span>
+                            <em>{vars[v.name].toFixed(v.decimals ?? 2)}{v.unit ? " "+v.unit : ""}</em>
+                        </div>
+                        <input type="range" className="widget-range"
+                            min={v.min} max={v.max}
+                            step={v.step ?? (v.max - v.min) / 100}
+                            value={vars[v.name]}
+                            onChange={e => handleChange(v.name, e.target.value)}
+                        />
+                    </div>
+                ))}
+            </div>
+            {/* Chart wrapper — flex:1 so it takes remaining space; ResizeObserver reads real px */}
+            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0, minWidth: 0 }}>
+                {chartSize.width > 0 && chartSize.height > 0 && (
+                    <LineChart width={chartSize.width} height={chartSize.height}
+                        data={data} margin={{ top:8, right:16, bottom:20, left:8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                        <XAxis dataKey="x" stroke="#64748b" tick={{ fontSize:10, fill:"#94a3b8" }}
+                            tickCount={5} label={{ value: config.x_label || config.x_var,
+                                position:"insideBottom", offset:-10,
+                                style:{ fill:"#94a3b8", fontSize:10 } }} />
+                        <YAxis stroke="#64748b" tick={{ fontSize:10, fill:"#94a3b8" }}
+                            label={{ value: config.y_label || "y",
+                                angle:-90, position:"insideLeft",
+                                style:{ fill:"#94a3b8", fontSize:10 } }} />
+                        <Tooltip
+                            contentStyle={{ background:"#1e293b", border:"1px solid #334155",
+                                            borderRadius:"0.5rem", fontSize:"0.75rem" }}
+                            labelStyle={{ color:"#94a3b8" }}
+                            itemStyle={{ color:"#10b981" }}
+                            formatter={(v) => [v.toFixed(3), config.y_label || "y"]}
+                            labelFormatter={(v) => `${config.x_label || config.x_var}: ${parseFloat(v).toFixed(3)}`}
+                        />
+                        <Line type="monotone" dataKey="y"
+                            stroke="#10b981" strokeWidth={2} dot={false} />
+                        {(() => {
+                            const xv = vars[config.x_var] ?? 0;
+                            const yv = evalFormula(config.formula, vars);
+                            if (yv === null) return null;
+                            return <ReferenceLine x={xv} stroke="#f59e0b" strokeDasharray="4 2" strokeWidth={1.5} />;
+                        })()}
+                    </LineChart>
+                )}
+            </div>
+            {/* Live formula result */}
+            {(() => {
+                const yv = evalFormula(config.formula, vars);
+                if (yv === null) return null;
+                return (
+                    <div style={{ textAlign:"center", fontSize:"0.72rem",
+                                  color:"#94a3b8", paddingBottom:"0.25rem" }}>
+                        {config.result_label || config.y_label || "Result"}:{" "}
+                        <strong style={{ color:"#10b981", fontSize:"0.85rem" }}>
+                            {yv.toFixed(config.result_decimals ?? 2)}
+                            {config.result_unit ? " " + config.result_unit : ""}
+                        </strong>
+                    </div>
+                );
+            })()}
+        </div>
+    );
+}
+
+// ── BarChartWidget ────────────────────────────────────────────────────────────
+function BarChartWidget({ config }) {
+    const initVars = {};
+    config.variables.forEach(v => { initVars[v.name] = v.default ?? v.min; });
+    const [vars,      setVars]      = useState(initVars);
+    const [chartSize, setChartSize] = useState({ width: 0, height: 0 });
+    const chartWrapRef = useRef(null);
+
+    useEffect(() => {
+        const el = chartWrapRef.current;
+        if (!el) return;
+        const ro = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width > 0 && height > 0) {
+                    setChartSize({ width: Math.floor(width), height: Math.floor(height) });
+                }
+            }
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
+    const notify = useCallback((newVars) => {
+        if (!window._lkRoom) return;
+        window._lkRoom.localParticipant.publishData(
+            new TextEncoder().encode(JSON.stringify({
+                type: "widget_interaction", widget: config.id, vars: newVars,
+            })), { reliable: true }
+        );
+    }, [config.id]);
+
+    const handleChange = (name, val) => {
+        const newVars = { ...vars, [name]: parseFloat(val) };
+        setVars(newVars);
+        notify(newVars);
+    };
+
+    const data = (config.categories || []).map(cat => ({
+        name: cat.label,
+        value: evalFormula(cat.formula || config.formula,
+                           { ...vars, ...(cat.vars || {}) }) ?? 0,
+    }));
+
+    return (
+        <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
+            <div style={{ flexShrink: 0 }}>
+                {config.variables.map(v => (
+                    <div key={v.name} className="widget-slider-row">
+                        <div className="widget-slider-label">
+                            <span>{v.label || v.name}</span>
+                            <em>{vars[v.name].toFixed(v.decimals ?? 2)}{v.unit ? " "+v.unit : ""}</em>
+                        </div>
+                        <input type="range" className="widget-range"
+                            min={v.min} max={v.max}
+                            step={v.step ?? (v.max - v.min) / 100}
+                            value={vars[v.name]}
+                            onChange={e => handleChange(v.name, e.target.value)}
+                        />
+                    </div>
+                ))}
+            </div>
+            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0, minWidth: 0 }}>
+                {chartSize.width > 0 && chartSize.height > 0 && (
+                    <BarChart width={chartSize.width} height={chartSize.height}
+                        data={data} margin={{ top:8, right:16, bottom:20, left:8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                        <XAxis dataKey="name" stroke="#64748b" tick={{ fontSize:10, fill:"#94a3b8" }} />
+                        <YAxis stroke="#64748b" tick={{ fontSize:10, fill:"#94a3b8" }}
+                            label={{ value: config.y_label || "value", angle:-90,
+                                position:"insideLeft", style:{ fill:"#94a3b8", fontSize:10 } }} />
+                        <Tooltip
+                            contentStyle={{ background:"#1e293b", border:"1px solid #334155",
+                                            borderRadius:"0.5rem", fontSize:"0.75rem" }}
+                            itemStyle={{ color:"#10b981" }} />
+                        <Bar dataKey="value" fill="#10b981" radius={[4,4,0,0]} />
+                    </BarChart>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// ── Widget dispatcher ─────────────────────────────────────────────────────────
+function WidgetRoot({ config }) {
+    if (!config) return null;
+    if (config.type === "bar_chart") return <BarChartWidget config={config} />;
+    return <LineChartWidget config={config} />;
+}
+
+// ── Mount function called from vanilla JS ─────────────────────────────────────
+// Cache the React 18 root so we never call createRoot on an already-used container.
+let _widgetReactRoot = null;
+
+function mountWidget(config) {
+    const rootEl   = document.getElementById("widget-root");
+    const panel    = document.getElementById("widget-panel");
+    const title    = document.getElementById("widget-title");
+    const rightCol = document.querySelector(".right-column");
+    if (!rootEl || !panel || !rightCol) return;
+
+    // Show panel and trigger proportional split BEFORE React renders,
+    // so the DOM already has real dimensions when ResizeObserver fires.
+    if (title) title.textContent = config.title || "Interactive Explorer";
+    panel.classList.add("active");
+    rightCol.classList.add("widget-active");
+
+    // Render immediately — ResizeObserver inside each widget component
+    // will detect the real pixel size once the browser lays out the panel
+    // and re-render the chart at the correct dimensions automatically.
+    if (!_widgetReactRoot) {
+        _widgetReactRoot = ReactDOM.createRoot(rootEl);
+    }
+    _widgetReactRoot.render(<WidgetRoot config={config} />);
+}
+
+function unmountWidget() {
+    const panel    = document.getElementById("widget-panel");
+    const rightCol = document.querySelector(".right-column");
+    if (_widgetReactRoot) _widgetReactRoot.render(null);
+    if (panel)    panel.classList.remove("active");
+    if (rightCol) rightCol.classList.remove("widget-active");
+}
+
+window.mountWidget   = mountWidget;
+window.unmountWidget = unmountWidget;
+</script>
+
+<script>
+// ── Scene state cache (needed to re-apply layout after reveal ops) ────────
+let _cachedScene    = null;   // last render_scene scene object
+let _cachedLayout   = "vertical";
+let _cachedPositions = {};    // node_id → {x,y,w,h,cx,cy}
+
+// Default appearance stored so reset_styles can restore it
+const _defaultStyle = {};     // node_id → {strokeColor, strokeWidth, opacity}
+
+// ── Auto-pan state ────────────────────────────────────────────────────────
+let _totalNodesInScene  = 0;   // set on render_scene
+let _revealedNodeCount  = 0;   // incremented on each reveal op
+let _pendingFocusNodeId = null; // node to pan to after next updateScene
+let _autoPanBadge       = null; // DOM element, grabbed lazily
+let _autoPanBadgeTimer  = null;
+
+function _getAutoPanBadge() {
+    if (!_autoPanBadge) _autoPanBadge = document.getElementById("autopan-badge");
+    return _autoPanBadge;
+}
+
+/** Show the "Following node…" badge for a couple of seconds */
+function _showAutoPanBadge(text) {
+    const badge = _getAutoPanBadge();
+    if (!badge) return;
+    badge.textContent = text || "📍 Following node…";
+    badge.classList.add("visible");
+    clearTimeout(_autoPanBadgeTimer);
+    _autoPanBadgeTimer = setTimeout(() => badge.classList.remove("visible"), 2000);
+}
+
+/**
+ * Smoothly pan Excalidraw so the given node is centred in the viewport.
+ * Uses scrollToContent on a synthetic single-element bounding box.
+ */
+function _panToNode(nodeId) {
+    const api = window.excalidrawAPI;
+    if (!api) return;
+    const pos = _cachedPositions[nodeId];
+    if (!pos) return;
+
+    // Build a tiny bounding box around just this node with generous padding
+    // so the node appears centred, not edge-flush.
+    const PAD = 120;
+    try {
+        // scrollToContent with a custom set of elements is the cleanest approach
+        const nodeEls = api.getSceneElements().filter(
+            el => el.groupIds && el.groupIds.includes(nodeId)
+        );
+        if (nodeEls.length > 0) {
+            api.scrollToContent(nodeEls, { fitToContent: false, animate: true, viewportZoomFactor: 0.9 });
+        }
+    } catch (_) {}
+    _showAutoPanBadge("📍 Following node…");
+}
+
+/** Zoom to fit the entire diagram once all nodes are revealed. */
+function _zoomToFitAll() {
+    const api = window.excalidrawAPI;
+    if (!api) return;
+    setTimeout(() => {
+        try {
+            api.scrollToContent(undefined, { fitToContent: true, animate: true });
+            _showAutoPanBadge("🗺️ Diagram complete — zoomed out");
+        } catch (_) {}
+    }, 300);
+}
+
+// ── PHASE 8: RendererAdapter ─────────────────────────────────────────────────
+// Converts a semantic node + its pre-measured position into Excalidraw elements.
+//
+// ICON SYSTEM:
+//   node.icon holds an MDI icon slug (e.g. "white-balance-sunny", "water").
+//   fetchSvgIcon(name) fetches the SVG from the Iconify API (MDI set,
+//   and caches the result as a base64 data-URL.  On a 404 / network error the
+//   icon is silently dropped — the node renders text-only, no placeholder.
+//
+//   The icon is placed as an Excalidraw `image` element inside the node box,
+//   vertically centred, to the LEFT of the label text.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── SVG icon fetcher & cache ─────────────────────────────────────────────────
+const _iconCache = {};   // slug → base64 data-URL | null (null = 404/error)
+
+async function fetchSvgIcon(name) {
+    if (!name) return null;
+    if (name in _iconCache) return _iconCache[name];
+
+    // Iconify API — Material Design Icons set.
+    // Returns a self-contained SVG with fill="currentColor" already set.
+    // color param tints the icon to white so it reads on dark node backgrounds.
+    const url = `https://api.iconify.design/mdi/${encodeURIComponent(name)}.svg?color=white&height=20`;
+
+    try {
+        const res = await fetch(url);
+        if (!res.ok) { _iconCache[name] = null; return null; }
+
+        const svgText = await res.text();
+        // Sanity-check: Iconify returns a 1×1 placeholder SVG for unknown names
+        if (svgText.includes('width="1"') || svgText.length < 60) {
+            _iconCache[name] = null;
+            return null;
+        }
+
+        const dataUrl = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgText)));
+        _iconCache[name] = dataUrl;
+        return dataUrl;
+    } catch (_) {
+        _iconCache[name] = null;
+        return null;
+    }
+}
+
+// Shared icon constants — must match LayoutEngine values
+const _ICON_SIZE = 20;
+const _ICON_GAP  = 6;
+const _ICON_SLOT = _ICON_SIZE + _ICON_GAP;
+
+function nodeToElements(node, pos) {
+    if (node.visible === false) return [];
+
+    const FONT_SIZE = 15;  // must match LayoutEngine.measureNode FONT_SIZE
+    const PADDING   = 20;  // must match LayoutEngine.measureNode PADDING
+    const shape     = node.shape || "rectangle";
+
+    const w      = pos.width;
+    const finalH = pos.height;
+
+    const hasIcon  = !!(node.icon);
+    const iconName = node.icon || null;
+
+    // Available text width (same logic as measureNode)
+    let textMaxW = w - PADDING * 2;
+    if (shape === "ellipse")  textMaxW = w * 0.55;
+    if (shape === "diamond")  textMaxW = w / 2 - PADDING;
+
+    // Label wraps into narrower column when icon present
+    const labelMaxW = hasIcon ? textMaxW - _ICON_SLOT : textMaxW;
+    const wrapW     = pos.wrapW != null
+        ? pos.wrapW
+        : labelMaxW * 0.82;
+
+    // Re-wrap label
+    const measCanvas = document.createElement("canvas");
+    const measCtx    = measCanvas.getContext("2d");
+    measCtx.font     = `${FONT_SIZE}px sans-serif`;
+
+    const rawLabel = String(node.label || "");
+    const rawLines = rawLabel.replace(/\n/g, "\n").split("\n").map(l => l.trim());
+    const finalLines = [];
+    for (const raw of rawLines) {
+        if (!raw) { finalLines.push(""); continue; }
+        const words = raw.split(" ");
+        let cur = words[0] || "";
+        for (let i = 1; i < words.length; i++) {
+            if (measCtx.measureText(cur + " " + words[i]).width <= wrapW) {
+                cur += " " + words[i];
+            } else {
+                finalLines.push(cur);
+                cur = words[i];
+            }
+        }
+        finalLines.push(cur);
+    }
+    const wrapped    = finalLines.join("\n");
+    const lineCount  = finalLines.length;
+    const lineH      = FONT_SIZE * 1.35;
+    const labelTextH = lineCount * lineH;
+
+    const cx = pos.cx != null ? pos.cx : pos.x + w / 2;
+    const cy = pos.cy != null ? pos.cy : pos.y + finalH / 2;
+
+    if (_cachedPositions[node.id]) {
+        _cachedPositions[node.id].height = finalH;
+        _cachedPositions[node.id].cy     = cy;
+    }
+
+    // ── Semantic style palette ────────────────────────────────────────────
+    const NODE_PALETTE = {
+        concept:    { fill: "#1e3a5f", stroke: "#60a5fa", text: "#bfdbfe",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        process:    { fill: "#064e3b", stroke: "#34d399", text: "#a7f3d0",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        step:       { fill: "#064e3b", stroke: "#34d399", text: "#a7f3d0",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        decision:   { fill: "#422006", stroke: "#fbbf24", text: "#fef3c7",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2.5, fontFamily: 1 },
+        terminal:   { fill: "#2e1065", stroke: "#c084fc", text: "#f3e8ff",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2.5, fontFamily: 1 },
+        data:       { fill: "#042f2e", stroke: "#2dd4bf", text: "#ccfbf1",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        thought:    { fill: "#500724", stroke: "#f9a8d4", text: "#fce7f3",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 1.5, fontFamily: 1 },
+        milestone:  { fill: "#451a03", stroke: "#fb923c", text: "#fed7aa",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2.5, fontFamily: 1 },
+        state:      { fill: "#052e16", stroke: "#4ade80", text: "#dcfce7",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        example:    { fill: "#451a03", stroke: "#fb923c", text: "#fed7aa",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        warning:    { fill: "#4c0519", stroke: "#f472b6", text: "#fbcfe8",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        note:       { fill: "#4c0519", stroke: "#f472b6", text: "#fbcfe8",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        definition: { fill: "#1e1b4b", stroke: "#a78bfa", text: "#ddd6fe",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        default:    { fill: "#1c1917", stroke: "#94a3b8", text: "#e2e8f0",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 2,   fontFamily: 1 },
+        icon:       { fill: "transparent", stroke: "transparent", text: "#f8fafc",
+                      roughness: 0,  fillStyle: "solid", strokeWidth: 0,   fontFamily: 1 },
+    };
+    const _pal    = NODE_PALETTE[(node.type || "default").toLowerCase()] || NODE_PALETTE.default;
+    const colours = {
+        fill:        _pal.fill,
+        stroke:      node.color || _pal.stroke,
+        text:        _pal.text,
+        roughness:   _pal.roughness,
+        fillStyle:   _pal.fillStyle,
+        strokeWidth: _pal.strokeWidth,
+        fontFamily:  _pal.fontFamily,
+    };
+
+    const shapeId = node.id + "_shape";
+    const textId  = node.id + "_text";
+    const iconId  = node.id + "_icon";
+
+    _defaultStyle[node.id] = { strokeColor: colours.stroke, strokeWidth: colours.strokeWidth, opacity: 100 };
+
+    const shapeEl = {
+        id:              shapeId,
+        type:            shape === "parallelogram" ? "rectangle" : shape,
+        version:         1,
+        versionNonce:    Math.floor(Math.random() * 1e9),
+        isDeleted:       false,
+        fillStyle:       colours.fillStyle,
+        strokeWidth:     colours.strokeWidth,
+        strokeStyle:     "solid",
+        roughness:       colours.roughness,
+        opacity:         100,
+        angle:           0,
+        x:               cx - w / 2,
+        y:               cy - finalH / 2,
+        width:           w,
+        height:          finalH,
+        strokeColor:     colours.stroke,
+        backgroundColor: colours.fill,
+        seed:            Math.floor(Math.random() * 1e9),
+        groupIds:        [node.id],
+        strokeSharpness: shape === "ellipse" ? "round" : "sharp",
+        boundElements:   [],
+        updated:         Date.now(),
+    };
+
+    // ── Icon layout ─────────────────────────────────────────────────────────
+    // The icon SVG sits on the left, vertically centred in the node.
+    // Label text sits to the right of the icon.
+    // Both are vertically centred relative to the full node height.
+
+    // Left edge of the content area (inside padding)
+    const contentLeft = cx - w / 2 + PADDING;
+
+    // Icon element (built synchronously — the actual image data is injected
+    // asynchronously by renderIconAsync() after the scene is placed)
+    const iconEl = hasIcon ? {
+        id:              iconId,
+        type:            "image",
+        version:         1,
+        versionNonce:    Math.floor(Math.random() * 1e9),
+        isDeleted:       false,
+        fillStyle:       "hachure",
+        strokeWidth:     0,
+        strokeStyle:     "solid",
+        roughness:       0,
+        opacity:         100,
+        angle:           0,
+        x:               contentLeft,
+        y:               cy - _ICON_SIZE / 2,
+        width:           _ICON_SIZE,
+        height:          _ICON_SIZE,
+        strokeColor:     "transparent",
+        backgroundColor: "transparent",
+        seed:            Math.floor(Math.random() * 1e9),
+        groupIds:        [node.id],
+        strokeSharpness: "sharp",
+        boundElements:   [],
+        updated:         Date.now(),
+        // fileId is set later by renderIconAsync; empty string = invisible placeholder
+        fileId:          null,
+        status:          "pending",
+        scale:           [1, 1],
+        // Store icon name for async resolution
+        _iconName:       iconName,
+    } : null;
+
+    // ── Label text ───────────────────────────────────────────────────────────
+    // When icon is present: label starts to the right of icon + gap.
+    // textMaxW for the label column.
+    const labelColW = hasIcon ? (textMaxW - _ICON_SLOT) : textMaxW;
+    const labelX    = hasIcon
+        ? contentLeft + _ICON_SLOT
+        : cx - labelColW / 2;
+
+    const textEl = {
+        id:              textId,
+        type:            "text",
+        version:         1,
+        versionNonce:    Math.floor(Math.random() * 1e9),
+        isDeleted:       false,
+        fillStyle:       "hachure",
+        strokeWidth:     1,
+        strokeStyle:     "solid",
+        roughness:       0,
+        opacity:         100,
+        angle:           0,
+        x:               labelX,
+        y:               cy - labelTextH / 2,
+        width:           labelColW,
+        height:          labelTextH,
+        strokeColor:     colours.text,
+        backgroundColor: "transparent",
+        seed:            Math.floor(Math.random() * 1e9),
+        groupIds:        [node.id],
+        strokeSharpness: "sharp",
+        boundElements:   [],
+        updated:         Date.now(),
+        fontSize:        FONT_SIZE,
+        fontFamily:      1,
+        text:            wrapped,
+        textAlign:       hasIcon ? "left" : "center",
+        verticalAlign:   "middle",
+        containerId:     null,
+        originalText:    node.label || "",
+        baseline:        Math.round(FONT_SIZE * 0.8),
+        lineHeight:      1.35,
+    };
+
+    if (shape === "text") return hasIcon ? [iconEl, textEl] : [textEl];
+    return hasIcon ? [shapeEl, iconEl, textEl] : [shapeEl, textEl];
+}
+
+// ── Async SVG injection ──────────────────────────────────────────────────────
+// After placing nodes on the canvas, we fetch their SVG icons and inject them
+// as Excalidraw file entries + update the image elements with the fileId.
+// On 404 / network error the icon element is silently deleted.
+async function renderIconsAsync(nodes) {
+    const api = window.excalidrawAPI;
+    if (!api) return;
+
+    const iconNodes = Object.values(nodes).filter(n => n.icon && n.visible !== false);
+    if (iconNodes.length === 0) return;
+
+    const updates = [];
+    const newFiles = {};
+
+    for (const node of iconNodes) {
+        const slug    = node.icon;
+        const dataUrl = await fetchSvgIcon(slug);
+        const iconId  = node.id + "_icon";
+
+        if (!dataUrl) {
+            // 404 / error: delete the placeholder image element
+            updates.push({ id: iconId, isDeleted: true });
+            continue;
+        }
+
+        // Use slug as the fileId (stable, deduplicated)
+        const fileId = "icon_" + slug.replace(/[^a-z0-9]/g, "_");
+
+        if (!newFiles[fileId]) {
+            newFiles[fileId] = {
+                id:       fileId,
+                dataURL:  dataUrl,
+                mimeType: "image/svg+xml",
+                created:  Date.now(),
+            };
+        }
+
+        updates.push({ id: iconId, fileId, status: "saved" });
+    }
+
+    if (updates.length === 0 && Object.keys(newFiles).length === 0) return;
+
+    // Add files to Excalidraw's file store
+    if (Object.keys(newFiles).length > 0) {
+        api.addFiles(Object.values(newFiles));
+    }
+
+    // Patch the image elements with their fileId
+    if (updates.length > 0) {
+        const existing = api.getSceneElements();
+        const patched  = existing.map(el => {
+            const upd = updates.find(u => u.id === el.id);
+            if (!upd) return el;
+            return { ...el, ...upd, versionNonce: Math.floor(Math.random() * 1e9) };
+        });
+        api.updateScene({ elements: patched });
+    }
+}
+
+// ── FIX: border-to-border arrow routing ──────────────────────────────────
+// Computes the exact point on the shape's bounding box edge where the
+// arrow should start/end, so arrows never pass through node bodies.
+function shapeBorderPoint(pos, toX, toY) {
+    const cx = pos.cx != null ? pos.cx : pos.x + pos.width  / 2;
+    const cy = pos.cy != null ? pos.cy : pos.y + pos.height / 2;
+    const hw = pos.width  / 2;
+    const hh = pos.height / 2;
+
+    const dx = toX - cx;
+    const dy = toY - cy;
+    if (dx === 0 && dy === 0) return { x: cx, y: cy };
+
+    // Parametric intersection with axis-aligned bounding box
+    const tx = dx !== 0 ? hw / Math.abs(dx) : Infinity;
+    const ty = dy !== 0 ? hh / Math.abs(dy) : Infinity;
+    const t  = Math.min(tx, ty);
+
+    return { x: cx + dx * t, y: cy + dy * t };
+}
+
+function edgeToElement(edge, positions) {
+    if (edge.visible === false) return null;
+
+    const sp = positions[edge.source];
+    const tp = positions[edge.target];
+    if (!sp || !tp) return null;
+
+    const scx = sp.cx != null ? sp.cx : sp.x + sp.width  / 2;
+    const scy = sp.cy != null ? sp.cy : sp.y + sp.height / 2;
+    const tcx = tp.cx != null ? tp.cx : tp.x + tp.width  / 2;
+    const tcy = tp.cy != null ? tp.cy : tp.y + tp.height / 2;
+
+    // Border-to-border points
+    const start = shapeBorderPoint(sp, tcx, tcy);
+    const end   = shapeBorderPoint(tp, scx, scy);
+
+    // Edge style
+    const strokeStyle = edge.style === "dashed" ? "dashed"
+                      : edge.style === "dotted"  ? "dotted"
+                      : "solid";
+    const strokeColor = edge.animated ? "#fbbf24" : (edge.style === "dashed" ? "#7dd3fc" : "#94a3b8");
+    const strokeWidth = edge.animated ? 3 : (edge.style === "dashed" ? 1.5 : 2);
+
+    const minX = Math.min(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const w    = Math.max(Math.abs(end.x - start.x), 2);
+    const h    = Math.max(Math.abs(end.y - start.y), 2);
+
+    // Midpoint of the straight line — used for label placement
+    const mx = (start.x + end.x) / 2;
+    const my = (start.y + end.y) / 2;
+
+    const arrowEl = {
+        id:              edge.id,
+        type:            "arrow",
+        version:         1,
+        versionNonce:    Math.floor(Math.random() * 1e9),
+        isDeleted:       false,
+        fillStyle:       "hachure",
+        strokeWidth:     strokeWidth,
+        strokeStyle:     strokeStyle,
+        roughness:       0,
+        opacity:         100,
+        angle:           0,
+        x:               minX,
+        y:               minY,
+        width:           w,
+        height:          h,
+        strokeColor:     strokeColor,
+        backgroundColor: "transparent",
+        seed:            Math.floor(Math.random() * 1e9),
+        groupIds:        [],
+        strokeSharpness: "round",
+        boundElements:   [],
+        updated:         Date.now(),
+        // Straight 2-point arrow
+        points: [
+            [start.x - minX, start.y - minY],
+            [end.x   - minX, end.y   - minY],
+        ],
+        startArrowhead:  edge.bidirectional ? "arrow" : null,
+        endArrowhead:    "arrow",
+        startBinding:    null,
+        endBinding:      null,
+    };
+
+    // ── Edge label as a floating text element ─────────────────────────────
+    if (!edge.label) return [arrowEl];
+
+    const labelEl = {
+        id:              edge.id + "_label",
+        type:            "text",
+        version:         1,
+        versionNonce:    Math.floor(Math.random() * 1e9),
+        isDeleted:       false,
+        fillStyle:       "hachure",
+        strokeWidth:     1,
+        strokeStyle:     "solid",
+        roughness:       0,
+        opacity:         100,
+        angle:           0,
+        // Centre the label on the straight midpoint
+        x:               mx - 60,
+        y:               my - 18,
+        width:           120,
+        height:          20,
+        strokeColor:     strokeColor,
+        backgroundColor: "transparent",
+        seed:            Math.floor(Math.random() * 1e9),
+        groupIds:        [],
+        strokeSharpness: "sharp",
+        boundElements:   [],
+        updated:         Date.now(),
+        fontSize:        13,
+        fontFamily:      1,
+        text:            edge.label,
+        textAlign:       "center",
+        verticalAlign:   "middle",
+        containerId:     null,
+        originalText:    edge.label,
+        baseline:        10,
+        lineHeight:      1.2,
+    };
+
+    return [arrowEl, labelEl];
+}
+
+// Wrap the old single-return contract: callers expecting a single element
+// now need to handle an array. Update call sites below.
+function edgeToElements(edge, positions) {
+    const result = edgeToElement(edge, positions);
+    if (!result) return [];
+    return Array.isArray(result) ? result : [result];
+}
+
+// ── Feature 2: Fade-in animation for revealed nodes ──────────────────────
+// Animates a node from opacity 0 → 100 over ~350ms using requestAnimationFrame.
+// Uses a stepped approach: update Excalidraw scene at each opacity keyframe.
+const FADE_STEPS     = [0, 15, 35, 55, 72, 85, 93, 100];
+const FADE_INTERVAL  = 45; // ms between steps
+
+function _fadeInNodeIds(nodeId, edgeIds) {
+    const api = window.excalidrawAPI;
+    if (!api) return;
+
+    let step = 0;
+    function tick() {
+        if (step >= FADE_STEPS.length) return;
+        const opacity = FADE_STEPS[step];
+        step++;
+
+        const current = api.getSceneElements();
+        const updated = current.map(el => {
+            const isNode = el.groupIds && el.groupIds.includes(nodeId);
+            const isEdge = edgeIds && edgeIds.some(eid => el.id === eid || el.id === eid + "_label");
+            if (isNode || isEdge) {
+                return { ...el, opacity, updated: Date.now() };
+            }
+            return el;
+        });
+        api.updateScene({ elements: updated });
+
+        if (step < FADE_STEPS.length) {
+            setTimeout(tick, FADE_INTERVAL);
+        }
+    }
+    // Start from invisible — already set to opacity 0 by caller
+    setTimeout(tick, 16);
+}
+
+// ── PHASE 3: applyPatch ───────────────────────────────────────────────────
+// The only function that touches Excalidraw.
+// Handles all op types: clear, render_scene, reveal, reveal_edge,
+//                       highlight, dim_except, reset_styles, animate_edge, delete
+function applyPatch(patch) {
+    const api = window.excalidrawAPI;
+    if (!api) { console.warn("[Renderer] Excalidraw not ready"); return; }
+
+    let elements = [...api.getSceneElements()];
+    let needsScroll = false;
+
+    for (const op of patch.operations || []) {
+
+        // ── clear ──────────────────────────────────────────────────────────
+        if (op.op === "clear") {
+            elements = [];
+            _cachedScene     = null;
+            _cachedPositions = {};
+            _totalNodesInScene = 0;
+            _revealedNodeCount = 0;
+            updateProgressBar(0, 0);
+            continue;
+        }
+
+        // ── render_scene: full atomic replace ─────────────────────────────
+        if (op.op === "render_scene") {
+            const { scene, layout } = op;
+            _cachedScene    = scene;
+            _cachedLayout   = layout || "vertical";
+
+            // Track node count for zoom-to-fit-on-complete
+            _totalNodesInScene = Object.keys(scene.nodes || {}).length;
+            _revealedNodeCount = 0;
+            updateProgressBar(0, _totalNodesInScene);
+
+            // Run the layout engine — no manual coordinates
+            const positions = LayoutEngine.compute(scene, _cachedLayout);
+            _cachedPositions = positions;
+
+            const newEls = [];
+
+            for (const [id, node] of Object.entries(scene.nodes || {})) {
+                const pos = positions[id];
+                if (!pos) continue;
+                nodeToElements(node, pos).forEach(el => newEls.push(el));
+            }
+            for (const [, edge] of Object.entries(scene.edges || {})) {
+                edgeToElements(edge, positions).forEach(el => newEls.push(el));
+            }
+
+            // Keep user-drawn annotations that don't belong to this scene
+            const sceneIds = new Set(newEls.map(e => e.id));
+            const kept = elements.filter(e => !sceneIds.has(e.id));
+            elements = [...kept, ...newEls];
+            needsScroll = true;
+
+            // Async: fetch & inject SVG icons for all visible nodes
+            // (runs after this patch's updateScene call flushes)
+            setTimeout(() => renderIconsAsync(scene.nodes || {}), 50);
+            continue;
+        }
+
+        // ── PHASE 6: reveal — make one hidden node visible ─────────────────
+        if (op.op === "reveal") {
+            const nodeId = op.node_id;
+            if (!_cachedScene) continue;
+
+            const node = (_cachedScene.nodes || {})[nodeId];
+            if (!node) continue;
+            node.visible = true;   // update cache
+
+            const pos = _cachedPositions[nodeId];
+            if (!pos) continue;
+
+            // Add the newly revealed node's elements — start at opacity 0 for fade-in
+            const newEls = nodeToElements(node, pos).map(el => ({ ...el, opacity: 0 }));
+            const ids    = new Set(newEls.map(e => e.id));
+            elements = [...elements.filter(e => !ids.has(e.id)), ...newEls];
+
+            // Also reveal any edges connecting to already-visible nodes
+            const revealedEdgeIds = [];
+            for (const [, edge] of Object.entries(_cachedScene.edges || {})) {
+                if (edge.visible === false) continue;
+                const srcNode = (_cachedScene.nodes || {})[edge.source];
+                const tgtNode = (_cachedScene.nodes || {})[edge.target];
+                if (!srcNode || !tgtNode) continue;
+                if (srcNode.visible && tgtNode.visible) {
+                    const eEls = edgeToElements(edge, _cachedPositions).map(el => ({ ...el, opacity: 0 }));
+                    if (eEls.length) {
+                        const eIds = new Set(eEls.map(e => e.id));
+                        elements = [...elements.filter(e => !eIds.has(e.id)), ...eEls];
+                        revealedEdgeIds.push(...eEls.map(e => e.id));
+                    }
+                }
+            }
+
+            // Schedule fade-in after this updateScene call flushes
+            setTimeout(() => _fadeInNodeIds(nodeId, revealedEdgeIds), 30);
+
+            // Async: fetch & inject SVG icon for this newly revealed node
+            if (node.icon) {
+                setTimeout(() => renderIconsAsync({ [nodeId]: node }), 80);
+            }
+
+            // Track progress; zoom-to-fit when the last node is revealed
+            _revealedNodeCount++;
+            updateProgressBar(_revealedNodeCount, _totalNodesInScene);
+            if (_totalNodesInScene > 0 && _revealedNodeCount >= _totalNodesInScene) {
+                // Schedule after updateScene flushes
+                setTimeout(_zoomToFitAll, 200);
+            }
+
+            // BUG 2 FIX: do NOT set needsScroll here — focus_node handles the
+            // viewport and zooms to the specific node, not the whole diagram.
+            continue;
+        }
+
+        // ── PHASE 6 / BUG 2 FIX: focus_node — zoom to specific node ──────────
+        // Sent together with reveal in the same patch.  Runs after reveal has
+        // added the node elements, so the node is in the scene when we scroll.
+        if (op.op === "focus_node") {
+            const nodeId = op.node_id;
+            const pos    = _cachedPositions[nodeId];
+            if (pos) {
+                // Store for deferred scroll (after updateScene flushes)
+                _pendingFocusNodeId = nodeId;
+            }
+            continue;
+        }
+
+        // ── reveal_edge ────────────────────────────────────────────────────
+        if (op.op === "reveal_edge") {
+            const edgeId = op.edge_id;
+            if (!_cachedScene) continue;
+            const edge = (_cachedScene.edges || {})[edgeId];
+            if (!edge) continue;
+            edge.visible = true;
+            const eEls = edgeToElements(edge, _cachedPositions);
+            if (eEls.length) {
+                const eIds = new Set(eEls.map(e => e.id));
+                elements = [...elements.filter(e => !eIds.has(e.id)), ...eEls];
+            }
+            continue;
+        }
+
+        // ── PHASE 6: highlight — spotlight one node ────────────────────────
+        if (op.op === "highlight") {
+            const nodeId      = op.node_id;
+            const resetOthers = op.reset_others !== false;
+
+            elements = elements.map(el => {
+                const isTarget = el.groupIds && el.groupIds.includes(nodeId);
+                const isShape  = el.type !== "text" && el.type !== "arrow";
+
+                if (isTarget && isShape) {
+                    return { ...el, strokeColor: "#f59e0b", strokeWidth: 4,
+                             opacity: 100, updated: Date.now() };
+                }
+                if (resetOthers && !isTarget && isShape) {
+                    const defId  = el.groupIds && el.groupIds[0];
+                    const def    = defId && _defaultStyle[defId];
+                    return def
+                        ? { ...el, strokeColor: def.strokeColor,
+                                   strokeWidth: def.strokeWidth,
+                                   opacity: 100, updated: Date.now() }
+                        : el;
+                }
+                return el;
+            });
+
+            // Auto-pan to the highlighted node so user doesn't have to drag
+            _pendingFocusNodeId = nodeId;
+            continue;
+        }
+
+        // ── PHASE 6: dim_except — fade everything but one node ─────────────
+        if (op.op === "dim_except") {
+            const nodeId = op.node_id;
+            elements = elements.map(el => {
+                const isTarget = el.groupIds && el.groupIds.includes(nodeId);
+                if (isTarget) {
+                    return { ...el, opacity: 100, updated: Date.now() };
+                }
+                // Dim non-target shapes and arrows
+                if (el.type !== "text") {
+                    return { ...el, opacity: 25, updated: Date.now() };
+                }
+                return el;
+            });
+            continue;
+        }
+
+        // ── PHASE 6: reset_styles — restore default appearance ─────────────
+        if (op.op === "reset_styles") {
+            elements = elements.map(el => {
+                if (el.type === "text" || el.type === "arrow") return el;
+                const nodeId = el.groupIds && el.groupIds[0];
+                const def    = nodeId && _defaultStyle[nodeId];
+                if (def) {
+                    return { ...el, strokeColor: def.strokeColor,
+                                    strokeWidth: def.strokeWidth,
+                                    opacity: 100, updated: Date.now() };
+                }
+                return { ...el, opacity: 100 };
+            });
+            // Reset arrow opacity too
+            elements = elements.map(el =>
+                el.type === "arrow"
+                    ? { ...el, opacity: 100, strokeWidth: 2, updated: Date.now() }
+                    : el
+            );
+            continue;
+        }
+
+        // ── PHASE 6: animate_edge — highlight an edge in amber ─────────────
+        if (op.op === "animate_edge") {
+            const edgeId = op.edge_id;
+            elements = elements.map(el =>
+                el.id === edgeId
+                    ? { ...el, strokeColor: "#fbbf24", strokeWidth: 3,
+                               strokeStyle: "dashed", updated: Date.now() }
+                    : el
+            );
+            continue;
+        }
+
+        // ── delete ─────────────────────────────────────────────────────────
+        if (op.op === "delete") {
+            const prefix = op.node_id || op.edge_id || "";
+            elements = elements.filter(e =>
+                !e.id.startsWith(prefix) &&
+                !(e.groupIds && e.groupIds.includes(prefix))
+            );
+            continue;
+        }
+    }
+
+    api.updateScene({ elements });
+
+    if (needsScroll) {
+        setTimeout(() => {
+            try { api.scrollToContent(undefined, { fitToContent: true, animate: true }); }
+            catch (_) {}
+        }, 150);
+    }
+
+    // ── Deferred auto-pan: runs after Excalidraw has rendered the new elements
+    if (_pendingFocusNodeId) {
+        const focusId = _pendingFocusNodeId;
+        _pendingFocusNodeId = null;
+        setTimeout(() => _panToNode(focusId), 150);
+    }
+}
+
+
+// ── PHASE 4: ACK ─────────────────────────────────────────────────────────
+function sendAck(transactionId) {
+    if (!window._lkRoom) return;
+    const ack = JSON.stringify({ type: "scene_ack", transaction_id: transactionId });
+    window._lkRoom.localParticipant.publishData(
+        new TextEncoder().encode(ack), { reliable: true }
+    );
+}
+
+
+// ── Progress bar ──────────────────────────────────────────────────────────
+const _progressBar   = document.getElementById("progress-bar");
+const _progressLabel = document.getElementById("progress-label");
+
+function updateProgressBar(revealed, total) {
+    if (!_progressBar) return;
+    if (!total) {
+        _progressBar.style.width = "0%";
+        if (_progressLabel) _progressLabel.textContent = "";
+        return;
+    }
+    const pct = Math.min(100, Math.round((revealed / total) * 100));
+    _progressBar.style.width = pct + "%";
+    if (_progressLabel) {
+        _progressLabel.textContent = pct === 100 ? "✓ Complete" : `${revealed} / ${total}`;
+    }
+}
+
+
+// ── Audio waveform visualiser ─────────────────────────────────────────────
+const _wfCanvas  = document.getElementById("waveform-canvas");
+const _wfCtx     = _wfCanvas ? _wfCanvas.getContext("2d") : null;
+const _wfWrap    = document.getElementById("waveform-wrap");
+const WF_BARS    = 26;
+const WF_GAP     = 2;
+let   _wfAnimId  = null;
+let   _wfAnalyser = null;
+let   _wfDataArr  = null;
+
+function _wfDraw() {
+    if (!_wfCtx || !_wfCanvas) return;
+    const W   = _wfCanvas.width;
+    const H   = _wfCanvas.height;
+    const barW = Math.floor((W - (WF_BARS - 1) * WF_GAP) / WF_BARS);
+
+    _wfCtx.clearRect(0, 0, W, H);
+
+    for (let i = 0; i < WF_BARS; i++) {
+        const x = i * (barW + WF_GAP);
+        let bh, r, g, b;
+
+        if (_wfAnalyser && _wfDataArr) {
+            // Live: read real frequency data
+            _wfAnalyser.getByteFrequencyData(_wfDataArr);
+            const step = Math.floor(_wfDataArr.length * 0.55 / WF_BARS);
+            const raw  = _wfDataArr[i * step] / 255;          // 0–1
+            bh = Math.max(2, raw * (H - 4));
+            // green → cyan tint scaled by amplitude
+            r = Math.round(16  + raw * 20);
+            g = Math.round(185 - raw * 20);
+            b = Math.round(129 + raw * 110);
+        } else {
+            // Idle: gentle sine ripple in muted slate
+            const t = Date.now() / 900;
+            bh = 3 + Math.abs(Math.sin(t + i * 0.38)) * 5;
+            r = 71; g = 85; b = 105;   // slate-500
+        }
+
+        _wfCtx.fillStyle = `rgba(${r},${g},${b},${_wfAnalyser ? 0.9 : 0.35})`;
+        _wfCtx.fillRect(x, (H - bh) / 2, barW, bh);
+    }
+
+    _wfAnimId = requestAnimationFrame(_wfDraw);
+}
+
+// Start idle animation immediately
+_wfDraw();
+
+function attachWaveformToTrack(mediaStreamTrack) {
+    try {
+        const actx     = new (window.AudioContext || window.webkitAudioContext)();
+        const stream   = new MediaStream([mediaStreamTrack]);
+        const source   = actx.createMediaStreamSource(stream);
+        const analyser = actx.createAnalyser();
+        analyser.fftSize        = 128;
+        analyser.smoothingTimeConstant = 0.75;
+        source.connect(analyser);
+        _wfAnalyser = analyser;
+        _wfDataArr  = new Uint8Array(analyser.frequencyBinCount);
+        if (_wfWrap) _wfWrap.classList.add("live");
+    } catch (e) {
+        console.warn("[Waveform] Web Audio setup failed:", e);
+    }
+}
+
+function detachWaveform() {
+    _wfAnalyser = null;
+    _wfDataArr  = null;
+    if (_wfWrap) _wfWrap.classList.remove("live");
+}
+
+
+// ── LiveKit wiring ────────────────────────────────────────────────────────
+const connectBtn        = document.getElementById("connectBtn");
+const disconnectBtn     = document.getElementById("disconnectBtn");
+const statusText        = document.getElementById("status-text");
+const connectionState   = document.getElementById("connection-state");
+const chatMessages      = document.getElementById("chat-messages");
+const chatInput         = document.getElementById("chat-input");
+const sendBtn           = document.getElementById("sendBtn");
+const speakingIndicator = document.getElementById("speaking-indicator");
+
+let _thinkingEl = null;
+
+function showThinkingIndicator() {
+    if (_thinkingEl) return; // already showing
+    _thinkingEl = document.createElement("div");
+    _thinkingEl.className = "thinking-bubble";
+    _thinkingEl.innerHTML = `
+        <div class="thinking-dots"><i></i><i></i><i></i></div>
+        <span>Agent is thinking…</span>`;
+    chatMessages.appendChild(_thinkingEl);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function hideThinkingIndicator() {
+    if (_thinkingEl) {
+        _thinkingEl.remove();
+        _thinkingEl = null;
+    }
+}
+
+function addChatMessage(text, sender) {
+    hideThinkingIndicator(); // dismiss thinking bubble on any agent reply
+    const msg = document.createElement("div");
+    msg.className = `message ${sender}`;
+    msg.textContent = text;
+    chatMessages.appendChild(msg);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+async function connect() {
+    try {
+        connectBtn.disabled = true;
+        connectionState.textContent = "Fetching Token…";
+
+        const response = await fetch("/api/token");
+        const data     = await response.json();
+
+        connectionState.textContent = "Connecting…";
+        const room = new LivekitClient.Room();
+        window._lkRoom = room;
+
+        room.on(LivekitClient.RoomEvent.Connected, () => {
+            statusText.textContent      = "Connected to Tutor";
+            connectionState.textContent = "Connected (Microphone Active)";
+            connectionState.style.color = "var(--primary)";
+            disconnectBtn.disabled = false;
+            chatInput.disabled     = false;
+            sendBtn.disabled       = false;
+        });
+
+        room.on(LivekitClient.RoomEvent.Disconnected, () => {
+            statusText.textContent      = "Disconnected";
+            connectionState.textContent = "Ready to Join";
+            connectionState.style.color = "";
+            connectBtn.disabled    = false;
+            disconnectBtn.disabled = true;
+            chatInput.disabled     = true;
+            sendBtn.disabled       = true;
+            window._lkRoom         = null;
+            detachWaveform();
+            updateProgressBar(0, 0);
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+            if (track.kind === LivekitClient.Track.Kind.Audio) {
+                const el = track.attach();
+                document.body.appendChild(el);
+                // Wire waveform to the agent's audio stream
+                if (track.mediaStreamTrack) {
+                    attachWaveformToTrack(track.mediaStreamTrack);
+                }
+                track.on(LivekitClient.TrackEvent.AudioPlaybackStarted,  () => { speakingIndicator.style.display = "block";  });
+                track.on(LivekitClient.TrackEvent.AudioPlaybackFailed,   () => { speakingIndicator.style.display = "none"; detachWaveform(); });
+                track.on(LivekitClient.TrackEvent.AudioPlaybackStopped,  () => { speakingIndicator.style.display = "none";  });
+            }
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+            if (track.kind === LivekitClient.Track.Kind.Audio) detachWaveform();
+        });
+
+        /*
+         * PHASE 3/4 — DataReceived
+         * Frontend handles ONLY:
+         *   "chat"        → display message
+         *   "scene_patch" → applyPatch, then sendAck
+         * All semantic logic lives on the backend.
+         */
+        room.on(LivekitClient.RoomEvent.DataReceived, (payload) => {
+            try {
+                const action = JSON.parse(new TextDecoder().decode(payload));
+
+                if (action.type === "chat") {
+                    addChatMessage(action.text, action.sender || "agent");
+                    return;
+                }
+
+                if (action.type === "scene_patch") {
+                    hideThinkingIndicator(); // diagram starting = agent responded
+                    applyPatch(action);
+                    // Phase 4: ACK so backend can advance its timeline
+                    sendAck(action.transaction_id);
+                    return;
+                }
+
+                if (action.type === "widget_patch") {
+                    hideThinkingIndicator();
+                    if (action.config) {
+                        window.mountWidget(action.config);
+                    } else {
+                        window.unmountWidget();
+                    }
+                    return;
+                }
+            } catch (e) {
+                console.error("[DataReceived]", e);
+            }
+        });
+
+        await room.connect(data.url, data.token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+
+    } catch (err) {
+        console.error("[Connect]", err);
+        connectionState.textContent = "Connection Failed";
+        connectBtn.disabled = false;
+    }
+}
+
+async function disconnect() {
+    if (window._lkRoom) await window._lkRoom.disconnect();
+}
+
+function sendMessage() {
+    const text = chatInput.value.trim();
+    if (!text || !window._lkRoom) return;
+    const payload = JSON.stringify({ type: "chat", text });
+    window._lkRoom.localParticipant.publishData(
+        new TextEncoder().encode(payload), { reliable: true }
+    );
+    addChatMessage(text, "user");
+    chatInput.value = "";
+    // Show thinking dots while waiting for agent response
+    showThinkingIndicator();
+}
+
+// Widget close button
+document.getElementById("widget-close").addEventListener("click", () => {
+    window.unmountWidget();
+    // Notify backend so it knows the widget was dismissed
+    if (window._lkRoom) {
+        window._lkRoom.localParticipant.publishData(
+            new TextEncoder().encode(JSON.stringify({ type: "widget_closed" })),
+            { reliable: true }
+        );
+    }
+});
+
+connectBtn.addEventListener("click",   connect);
+disconnectBtn.addEventListener("click", disconnect);
+sendBtn.addEventListener("click",      sendMessage);
+chatInput.addEventListener("keypress", e => { if (e.key === "Enter") sendMessage(); });
+</script>
+
+</body>
+</html>

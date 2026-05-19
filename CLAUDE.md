@@ -26,11 +26,11 @@ uv add livekit-agents "livekit-plugins-openai[realtime]" livekit-plugins-deepgra
 # Sync dependencies
 uv sync
 
-# Run agent in development mode
-uv run python agent.py dev
+# Run tutor agent in development mode
+uv run python tutor_agent.py dev
 
-# Run agent in console mode for testing
-uv run python agent.py console
+# Run frontend server (starts HTTP/token server at port 8000)
+python frontend/server.py
 
 # Run tests
 uv run pytest -v --asyncio-mode=auto
@@ -234,12 +234,17 @@ async def test_tool_calls():
 
 1. **Dockerfile**:
 ```dockerfile
-FROM python:3.11-slim
+ARG PYTHON_VERSION=3.13
+FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS base
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN pip install uv && uv sync --frozen
+RUN mkdir -p src
+RUN uv sync --locked
 COPY . .
-CMD ["uv", "run", "python", "agent.py"]
+RUN chown -R appuser:appuser /app
+USER appuser
+RUN uv run "tutor_agent.py" download-files
+CMD ["uv", "run", "tutor_agent.py", "start"]
 ```
 
 2. **livekit.toml**:
@@ -273,11 +278,12 @@ DEEPGRAM_API_KEY=your-deepgram-key
 
 ### Base Configuration (Recommended Start)
 ```python
-# Start with these providers for best results
+# Start with these providers for best results (configured in tutor_agent.py)
 session = AgentSession(
     stt=deepgram.STT(model="nova-2"),
-    llm=openai.LLM(model="gpt-4.1-mini"),
-    tts=openai.TTS(voice="echo")
+    llm=openai.LLM(model="gpt-4o-mini"),
+    tts=deepgram.TTS(model="aura-asteria-en"),
+    vad=silero.VAD.load(),
 )
 ```
 
@@ -298,8 +304,8 @@ session = AgentSession(
 - **ALL plugin calls must be awaited** - Use `await`
 
 ### Model Downloads
-- **TTS models may download on first use** - Can be slow
-- Pre-download in Docker: `RUN uv run python -c "from livekit.plugins import cartesia; cartesia.TTS()"`
+- **TTS/VAD models may download on first use** - Can be slow
+- Pre-download in Docker: `RUN uv run "tutor_agent.py" download-files`
 
 ### Proxy Issues
 - Set `HTTP_PROXY` and `HTTPS_PROXY` if behind corporate firewall
@@ -335,10 +341,10 @@ logging.basicConfig(level=logging.DEBUG)
 ### Console Testing
 ```bash
 # Test in terminal with audio
-uv run python agent.py console
+uv run python tutor_agent.py console
 
 # Test specific scenarios
-uv run python agent.py test --scenario "greeting"
+uv run python tutor_agent.py test --scenario "greeting"
 ```
 
 ### Monitor Agent State
