@@ -1,21 +1,3 @@
-"""
-AI Voice Tutor — Backend Agent
-================================
-Fully refactored per the 10-phase plan:
-
-  Phase 1  — SceneManager (semantic source of truth, typed nodes/edges)
-  Phase 2  — Layout hint forwarded to frontend LayoutEngine (Dagre/circular/radial)
-  Phase 3  — Scene Patch system (atomic JSON patches, not individual draw calls)
-  Phase 4  — ACK system (backend waits for frontend confirmation before narrating)
-  Phase 5  — Speech + Visual Timeline Engine (synchronised narration + visuals)
-  Phase 6  — Progressive Teaching Mode (reveal nodes one-by-one, animate, dim)
-  Phase 7  — Visual Memory (lesson snapshots, topic graph, go-back / compare)
-  Phase 8  — Frontend treated as pure renderer adapter (no logic in index.html)
-  Phase 9  — Planning stage + full diagram-type support (flowchart, tree, mind_map,
-             timeline, state_machine, architecture, DSA)
-  Phase 10 — Patch batching (multiple ops collapsed into one round-trip)
-"""
-
 import asyncio
 import os
 import uuid
@@ -24,7 +6,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import AgentSession, JobContext, Agent, RunContext
+from livekit.agents import AgentSession, JobContext, Agent, RunContext, StopResponse
 from livekit.plugins import deepgram, openai, silero
 from livekit.agents.llm import function_tool
 
@@ -57,33 +39,6 @@ class SceneManager:
     The SceneManager emits JSON patch payloads — it never touches pixels.
     """
 
-    # node-type -> renderer shape hint
-    NODE_SHAPE: dict[str, str] = {
-        "process":   "text",
-        "decision":  "text",
-        "terminal":  "text",
-        "data":      "text",
-        "thought":   "text",
-        "milestone": "text",
-        "state":     "text",
-        "icon":      "text",
-        "default":   "text",
-    }
-
-    # node-type -> stroke colour hint
-    NODE_COLOR: dict[str, str] = {
-        "process":   "#a3c2fa",
-        "decision":  "#ffeb3b",
-        "terminal":  "#e1bee7",
-        "data":      "#80cbc4",
-        "thought":   "#f9a8d4",
-        "milestone": "#fcd34d",
-        "state":     "#86efac",
-        "icon":      "#ffffff",
-        "default":   "#a3c2fa",
-    }
-
-
     def __init__(self) -> None:
         self._nodes:      dict[str, dict] = {}
         self._edges:      dict[str, dict] = {}
@@ -113,8 +68,6 @@ class SceneManager:
             "icon":        kwargs.get("icon"),
             "connections": connections or [],
             "metadata":    metadata or {},
-            "shape":       self.NODE_SHAPE.get(node_type, "rectangle"),
-            "color":       self.NODE_COLOR.get(node_type, "#a3c2fa"),
             "group":       group,
             "visible":     True,   # Phase 6: toggled by reveal ops
         }
@@ -450,221 +403,79 @@ class TimelineExecutor:
 # ============================================================
 
 SYSTEM_INSTRUCTIONS = """You are an expert AI Tutor with access to a digital whiteboard canvas.
-Your mission: teach students clearly using synchronised speech and visual diagrams.
+Your mission: teach concepts clearly using synchronized speech and visual diagrams.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHEN TO USE THE CANVAS
+1. WHEN TO USE THE CANVAS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Draw when the concept has structure that benefits from a visual:
-  • Processes / workflows / algorithms  → flowchart     layout: vertical or horizontal
-  • Cycles (water, carbon, cell…)       → flowchart     layout: circular
-  • Hierarchies / trees / org charts   → tree           layout: vertical or horizontal
-  • State machines / automata           → state_machine  layout: horizontal
-  • Mind maps / concept webs            → mind_map      layout: radial
-  • Timelines / chronologies            → timeline      layout: timeline
-  • System architecture / networks      → flowchart     layout: horizontal
-  • DSA (linked list, stack, graph)     → flowchart     layout: horizontal
+Draw when concepts have structural visual benefits:
+  • Processes / workflows / algorithms / DSA / networks → flowchart (layout: vertical or horizontal)
+  • Cycles (water, carbon, etc.)                       → flowchart (layout: circular)
+  • Hierarchies / trees / org charts                   → tree (layout: vertical or horizontal)
+  • State machines / automata                           → state_machine (layout: horizontal)
+  • Mind maps / concept webs                            → mind_map (layout: radial)
+  • Timelines / chronologies                            → timeline (layout: timeline)
 
-Do NOT draw for: greetings, small talk, yes/no answers, simple one-sentence definitions.
+Do NOT draw for: greetings, small talk, yes/no answers, simple definitions.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MANDATORY TEACHING PIPELINE — ALWAYS FOLLOW THIS EXACTLY
+2. MANDATORY TEACHING PIPELINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. PLAN    — call plan_lesson(topic, diagram_type, layout, node_count_estimate).
-
-2. BUILD   — call build_scene(nodes_json='...', edges_json='...') with ALL nodes and ALL
-             edges in a single call as JSON strings. This replaces calling create_node /
-             create_edge one by one and cuts latency dramatically.
-             Do NOT call render_scene yet. Pass every node and edge at once.
-
-3. RENDER  — call render_scene(layout=..., progressive=True).
-             The FIRST node is revealed automatically by this call.
-             All other nodes start hidden. You will reveal them one by one.
-             Use progressive=False ONLY for 3 or fewer nodes.
-
-4. REVEAL LOOP — After render_scene returns, call reveal_next_node in a tight loop:
-             ┌─────────────────────────────────────────────────────────────┐
-             │  reveal_next_node(narration="1-3 sentences about the node   │
-             │                             CURRENTLY highlighted")         │
-             │  • The tool speaks your narration, then reveals the next.   │
-             │  • If it returns "CONTINUE LOOP" → call it again with       │
-             │    narration about the NEW highlighted node.                │
-             │  • If it returns "ALL DONE" → exit the loop.               │
-             └─────────────────────────────────────────────────────────────┘
-             ⚠ NEVER speak separately before/after the tool — put ALL
-               narration inside the narration= parameter.
-             ⚠ The tool handles speech timing internally. Just loop it.
-
-5. WIDGET   — If the topic involves a quantitative formula (interest, physics,
-             maths, economics, biology…), call show_widget() NOW, immediately
-             after the reveal loop, BEFORE reset_styles.
-             • Always explain the widget verbally right after calling it:
-               "Try dragging the sliders to see how Interest changes with Time."
-             • This step is MANDATORY for any formula-based topic.
-
-6. CLOSE   — After the loop (and widget if applicable), call reset_styles().
-             Then speak a brief 1-2 sentence summary of the whole diagram.
-             THEN invite questions: "Any questions about any of these steps?"
+Follow this exact sequence autonomously when teaching a visual concept:
+  1. PLAN: Call plan_lesson(topic, diagram_type, layout, node_count_estimate).
+  2. BUILD: Call scene(action='build', payload_json='...') to send ALL nodes and edges in ONE call. Do NOT call render_scene yet.
+  3. RENDER: Call render_scene(layout=..., progressive=True). (The first node is automatically revealed and highlighted).
+  4. REVEAL LOOP: Call reveal_next_node(narration='...') in a tight loop.
+     - Narration must explain the CURRENTLY highlighted node (already visible).
+     - The tool speaks the narration first, then reveals and highlights the next node.
+     - NEVER speak outside the tool (before/after/mid-loop) — put all narration inside the tool call.
+     - Loop until it returns 'ALL DONE'.
+  5. WIDGET: If the topic has quantitative formulas, proactively call widget(action='show', widget_type='line_chart', config_json='...') immediately after the reveal loop, before visual(action='reset'). Explain the sliders verbally. DO NOT ask or wait for permission.
+  6. CLOSE: Call visual(action='reset') to clear highlights, speak a brief 1-2 sentence summary, and invite questions.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL RULES FOR PROGRESSIVE TEACHING
+3. INTERACTIVE WIDGET PROTOCOL (PROACTIVE SIMULATION)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• reveal_next_node() owns timing. Do NOT speak before or after it — only inside narration=.
-• narration= must describe the CURRENTLY highlighted node (the one already on the board).
-• The tool speaks, then advances the board. Speech always leads the visual.
-• Never stop mid-loop and wait. The entire sequence runs autonomously.
-• For formula topics (interest, physics, etc.): call show_widget() after the loop, before reset_styles.
-• After the loop + widget, THEN call reset_styles() and invite questions.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE — correct autonomous loop for a 4-node diagram
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  render_scene(progressive=True) → board highlights 'Evaporation'
-  reveal_next_node(narration="Evaporation is step one. The sun heats...")
-      → tool speaks about Evaporation, then reveals+highlights 'Condensation'
-      → returns "CONTINUE LOOP — 'Condensation' is now highlighted..."
-  reveal_next_node(narration="Condensation happens when water vapour cools...")
-      → tool speaks about Condensation, then reveals+highlights 'Precipitation'
-      → returns "CONTINUE LOOP — 'Precipitation' is now highlighted..."
-  reveal_next_node(narration="Precipitation is rain, snow, or hail falling...")
-      → tool speaks about Precipitation, then reveals+highlights 'Collection'
-      → returns "CONTINUE TO CLOSE — final node 'Collection' is now highlighted..."
-  reveal_next_node(narration="Collection is where water gathers in oceans...")
-      → tool speaks about Collection, then returns "ALL DONE"
-  reset_styles()
-  speak("That's the full water cycle! Any questions?")
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOOLS REFERENCE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Planning:
-  plan_lesson(topic, diagram_type, layout, node_count_estimate)
-
-Scene building (use build_scene — not individual create_node/create_edge):
-  build_scene(nodes_json, edges_json)  — PREFERRED: build entire scene in 1 call as JSON strings
-  create_node(node_id, node_type, label, group?, icon_name?)  — individual add
-  create_edge(source_id, target_id, label?, style?, animated?) — individual add
-  create_flow(steps, layout)           — shortcut: builds + renders a linear flow
-  update_node(node_id, label?, node_type?)
-  remove_node(node_id)
-
-Rendering:
-  render_scene(layout, progressive?)   — layout: vertical | horizontal |
-                                         circular | radial | timeline
-  clear_scene()
-
-Progressive & animation:
-  reveal_next_node()                   — reveal the next hidden node; loop this!
-  highlight_node(node_id)              — spotlight one node
-  dim_except(node_id)                  — dim everything except one node
-  reset_styles()                       — restore default appearance
-  animate_edge(edge_id)                — show data flowing along an edge
-
-Visual memory:
-  go_back(steps?)                      — restore a previous diagram
-  compare_scenes(label_a?, label_b?)   — show two diagrams side by side
-  all_memory_labels()                  — list all saved snapshots
-
-Interactive widgets:
-  show_widget(widget_type, config_json) — open an interactive chart in the side panel
-  close_widget()                        — close the widget panel
-
+You must PROACTIVELY design and show an interactive widget whenever the topic involves quantitative relationships or formulas (e.g., maths, physics, finance).
+• DO NOT wait for the student to ask for a graph, and DO NOT ask them what variables/limits to use. Design and show it on the fly!
+• Call widget(action='show', widget_type='line_chart', config_json='...') immediately after the reveal loop, before visual(action='reset').
+• Explain the widget verbally: "Try dragging the sliders to see how..."
+• The `config_json` parameter MUST strictly follow this JSON schema:
+  {
+    "id": "unique_widget_id",
+    "title": "Title of the Simulation",
+    "formula": "standard JS mathematical expression (e.g., 'P * Math.pow(1 + r/n, n*t)')",
+    "x_var": "the variable name representing the X-axis (sweeps across its min/max range)",
+    "x_label": "X Axis Label",
+    "y_label": "Y Axis Label (result of the formula)",
+    "variables": [
+      {
+        "name": "variable_name_matching_formula",
+        "min": 0,
+        "max": 100,
+        "default": 10,
+        "step": 1,
+        "decimals": 0,
+        "label": "Slider Display Name",
+        "unit": "optional unit string"
+      }
+    ],
+    "result_label": "Label for the computed y value display",
+    "result_decimals": 2,
+    "result_unit": "optional result unit string"
+  }
+• CRITICAL: Every single variable name that appears in the `formula` (including the X-axis variable `x_var`, e.g., 't') MUST have its own entry in the `variables` array.
+• NOTE: The UI automatically filters out the X-axis variable `x_var` and will NOT render a slider for it on the screen. However, you MUST list it in the `variables` array anyway so that the chart knows its plotting range (min, max, step). If you omit it, the graph cannot render!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INTERACTIVE WIDGETS — PROACTIVE SIMULATION PROTOCOL
+4. CANVAS DESIGN RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You must PROACTIVELY design and show an interactive widget whenever the student asks about ANY scientific, mathematical, economic, or financial topic containing quantitative relationships or formulas. 
-DO NOT WAIT for the student to ask for a graph. DO NOT ASK the student what variables, limits, or formula to use. You are the expert—design these dynamically on the fly!
+  • Node Labels: Max 4 words (3 is ideal). NEVER repeat known context.
+  • Node Icons: Use lowercase, hyphen-separated MDI slugs (e.g. 'leaf', 'flask', 'cpu-64-bit', 'database', 'dna', 'brain', 'heart-pulse'). Use "" if no icon fits. NEVER embed emojis in label strings.
+  • Node Types: process, decision, terminal, data, thought, milestone, state, icon.
+  • Visual Memory: Use memory(action='back') or memory(action='compare') if the student asks to go back/compare.
+"""
 
-HOW TO BE PROACTIVE:
-  1. Identify the Core Equation (e.g., F = G*m1*m2/r^2, P = nRT/V, A = P(1+r)^t).
-  2. Select the X-Axis Variable (e.g., Time for growth, Distance for gravity).
-  3. Define Slider Variables for the remaining constants/coefficients.
-  4. Set High-Fidelity Bounds: Use realistic min/max limits, step sizes, and decimals for real-world values.
-  5. Design standard JS Math: Use standard JavaScript math expressions (Math.pow(x, 2), Math.sin(x), Math.exp(x)).
-
-WORKFLOW:
-  1. Draw the concept diagram as usual with create_node / render_scene.
-  2. Call show_widget() IMMEDIATELY after the diagram to open the interactive explorer.
-  3. Explain the formula verbally: "I've pulled up a graph on the right. Try moving the sliders to see..."
-  4. When the student drags a slider you'll be told the new values — comment briefly.
-  5. Call close_widget() when moving to an unrelated topic.
-
-FORMULA & CONFIG GUIDELINES:
-  • formula is a JS expression — use Math.pow, Math.sqrt, Math.sin, Math.exp etc.
-  • x_var MUST be one of the variable names in the variables array.
-  • Every variable name in the formula must appear in the variables array.
-  • Decimals & Steps: Choose sensible decimals for tiny numbers (e.g., G = 6.67e-11 needs 11 decimals) or large numbers (0 decimals).
-
-EXAMPLES (You can invent ANY other topic):
-  • Simple Harmonic Motion: formula='A * Math.sin(2 * Math.PI * f * t)', x_var='t', vars A,f,t
-  • Ideal Gas Law: formula='n * R * T / V', x_var='V', vars n,R,T,V
-  • Gravitation: formula='G * m1 * m2 / (r * r)', x_var='r', vars G,m1,m2,r
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NODE ICONS — MATERIAL DESIGN ICONS VIA ICONIFY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Icons are rendered as crisp vector SVG image elements on the canvas.
-The frontend fetches them at runtime from the Iconify API (MDI set).
-
-HOW TO USE:
-  • Pass icon_name= as an MDI slug — lowercase, hyphen-separated.
-    Science:   "white-balance-sunny", "water", "leaf", "molecule-co2",
-               "lightning-bolt", "weather-windy", "flask", "dna", "brain",
-               "heart-pulse", "atom", "bacteria", "eye", "lungs", "bone"
-    CS / Tech: "cpu-64-bit", "database", "cloud", "server", "git",
-               "lock", "shield", "api", "code-braces", "network", "robot"
-    Math:      "function-variant", "sigma", "chart-bell-curve", "vector-line"
-    History:   "sword", "crown", "church", "ship-wheel", "handshake"
-    General:   "account", "clock-outline", "flag", "star", "check-circle",
-               "alert", "lightbulb", "magnify", "cog", "arrow-right-circle"
-  • Browse the full MDI set: https://pictogrammers.com/library/mdi/
-  • If no icon fits, leave icon_name="" — clean text-only node is fine.
-  • NEVER embed emojis or symbols inside the label string.
-  • Icon renders to the LEFT of the label text, inline, inside the node box.
-  • For "icon" node type: icon + short label (never icon-only — ambiguous).
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NODE LABELS — KEEP THEM SHORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Labels must fit inside shapes. Hard rules:
-  • Maximum 4 words per label (3 is ideal).
-  • NEVER include dates or years in the label — put those in your speech instead.
-  • NEVER repeat context the student already knows (e.g. avoid "Step 3: …").
-  • Split long concepts into TWO nodes connected by an edge rather than one long label.
-
-  ✗ BAD:  "1943: Allied gains in North Africa and Italy"   (too long, has year)
-  ✓ GOOD: "Allied N. Africa gains"
-
-  ✗ BAD:  "Light-dependent reactions produce ATP and NADPH"
-  ✓ GOOD: "Light reactions"  →  "ATP + NADPH"
-
-  ✗ BAD:  "1945: Battle of Berlin and Germany's surrender"
-  ✓ GOOD: "Berlin / Surrender"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NODE TYPES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  process     → text-only   steps, actions
-  decision    → text-only   yes/no branches
-  terminal    → text-only   start / end
-  data        → text-only   input / output
-  thought     → text-only   mind-map bubbles
-  milestone   → text-only   timeline events
-  state       → text-only   state-machine states
-  icon        → text-only   labels with icons (emojis)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-VISUAL MEMORY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Every render_scene call auto-saves a snapshot.
-When the student says "go back", "compare", or "show previous" →
-use go_back() or compare_scenes() immediately."""
-
-
-# ============================================================
-# PHASE 1/5/6/7/8/9 — TutorAgent
-# ============================================================
 
 class TutorAgent(Agent):
 
@@ -710,6 +521,15 @@ class TutorAgent(Agent):
             return
         print("--- TUTOR: ON_ENTER ---")
         await self.greet_once()
+
+    async def on_user_turn_completed(
+        self, turn_ctx: agents.llm.ChatContext, new_message: agents.llm.ChatMessage
+    ) -> None:
+        """Called when the user has finished speaking. Stop responding on empty transcripts."""
+        text = new_message.text_content.strip() if new_message.text_content else ""
+        if not text:
+            print("[TutorAgent] Empty user turn (likely noise/echo). Ignoring turn.")
+            raise StopResponse()
 
     # -- ACK hook ----------------------------------------------------------
 
@@ -765,10 +585,16 @@ class TutorAgent(Agent):
             "node_count":   node_count_estimate,
         }
         print(f"[Plan] topic='{topic}' type={diagram_type} layout={layout} n~{node_count_estimate}")
+
+        # Close any active widget panel when starting a new lesson
+        if self._active_widget:
+            self._active_widget = None
+            await self._send_raw({"type": "widget_patch", "config": None})
+
         return (
             f"Plan set: topic='{topic}', diagram_type='{diagram_type}', "
             f"layout='{layout}', ~{node_count_estimate} nodes. "
-            "Now build the scene with create_node / create_edge (or create_flow), "
+            "Now build the scene with scene(action='build') or scene(action='create_node'), "
             "then call render_scene."
         )
 
@@ -776,167 +602,151 @@ class TutorAgent(Agent):
     # PHASE 1 — SCENE BUILDING TOOLS
     # ==================================================================
 
-    @function_tool(description=(
-        "Add a semantic node to the scene. "
-        "node_type: 'process' | 'decision' | 'terminal' | 'data' | "
-        "'thought' | 'milestone' | 'state'. "
-        "group: optional name to group related nodes (e.g. 'layer1', 'cluster_a'). "
-        "icon_name: optional MDI icon slug via Iconify (e.g. 'white-balance-sunny', "
-        "'water', 'leaf', 'lightning-bolt', 'flask', 'dna', 'cpu-64-bit', 'database'). "
-        "Browse: https://pictogrammers.com/library/mdi/ — leave empty if no icon needed."
-    ))
-    async def create_node(
-        self,
-        context: RunContext,
-        node_id: str,
-        node_type: str,
-        label: str,
-        group: str = "",
-        icon_name: str = "",
-    ) -> str:
-        self.scene.add_node(node_id, node_type, label, group=group or None, icon=icon_name or None)
-        print(f"[Scene] +node  {node_id} ({node_type}) '{label}' icon_name={icon_name!r}")
-        return f"Node '{node_id}' added to scene."
-
-    @function_tool(description=(
-        "Connect two existing nodes with a directed edge. "
-        "style: 'solid' | 'dashed' | 'dotted'. "
-        "animated: set true to show data flowing along this edge."
-    ))
-    async def create_edge(
-        self,
-        context: RunContext,
-        source_id: str,
-        target_id: str,
-        label: str = "",
-        style: str = "solid",
-        animated: bool = False,
-    ) -> str:
-        edge_id = f"e_{source_id}__{target_id}"
-        self.scene.add_edge(edge_id, source_id, target_id, label, style, animated)
-        print(f"[Scene] +edge  {source_id} -> {target_id}")
-        return f"Edge {source_id} -> {target_id} added."
-
-    @function_tool(description=(
-        "PREFERRED BUILD METHOD: add ALL nodes and ALL edges in a single call. "
-        "Use this instead of calling create_node + create_edge one by one — "
-        "it collapses N tool round-trips into 1, dramatically reducing latency. "
-        "Call plan_lesson first, then build_scene, then render_scene. "
-        "nodes_json: JSON string representing a list of dicts with keys: id (str), type (str), label (str), "
-        "group (str, optional), icon_name (str, optional). "
-        "edges_json: JSON string representing a list of dicts with keys: source (str), target (str), "
-        "label (str, optional), style ('solid'|'dashed'|'dotted', optional), "
-        "animated (bool, optional). "
-        "node type values: 'process' | 'decision' | 'terminal' | 'data' | "
-        "'thought' | 'milestone' | 'state' | 'icon'. "
-        "Does NOT render — call render_scene() after this."
-    ))
-    async def build_scene(
-        self,
-        context: RunContext,
-        nodes_json: str,
-        edges_json: str,
-    ) -> str:
-        import json as _json
-        try:
-            nodes = _json.loads(nodes_json)
-        except Exception as e:
-            return f"Invalid nodes_json: {e}"
-        try:
-            edges = _json.loads(edges_json)
-        except Exception as e:
-            return f"Invalid edges_json: {e}"
-
-        for n in nodes:
-            self.scene.add_node(
-                n["id"],
-                n.get("type", "process"),
-                n["label"],
-                group=n.get("group") or None,
-                icon=n.get("icon_name") or None,
-            )
-            print(f"[Scene] +node  {n['id']} ({n.get('type','process')}) '{n['label']}'")
-        for e in edges:
-            edge_id = f"e_{e['source']}__{e['target']}"
-            self.scene.add_edge(
-                edge_id,
-                e["source"],
-                e["target"],
-                e.get("label", ""),
-                e.get("style", "solid"),
-                e.get("animated", False),
-            )
-            print(f"[Scene] +edge  {e['source']} -> {e['target']}")
-        print(f"[Scene] build_scene: {len(nodes)} nodes, {len(edges)} edges")
-        return (
-            f"Scene built: {len(nodes)} nodes, {len(edges)} edges. "
-            "Now call render_scene(layout=..., progressive=True)."
+    @function_tool(
+        name="scene",
+        description=(
+            "Perform whiteboard scene modifications (create_node, create_edge, build, update, remove, clear).\n"
+            "action: 'create_node' | 'create_edge' | 'build' | 'update' | 'remove' | 'clear'\n"
+            "payload_json: JSON string payload for the action. Schema:\n"
+            "  - 'create_node': {\"node_id\": \"...\", \"node_type\": \"...\", \"label\": \"...\", \"group\": \"...\", \"icon_name\": \"...\"}\n"
+            "  - 'create_edge': {\"source_id\": \"...\", \"target_id\": \"...\", \"label\": \"...\", \"style\": \"...\", \"animated\": bool}\n"
+            "  - 'build': {\"nodes\": [{\"id\": \"...\", \"type\": \"...\", \"label\": \"...\", \"group\": \"...\", \"icon_name\": \"...\"}, ...], \"edges\": [{\"source\": \"...\", \"target\": \"...\", \"label\": \"...\", \"style\": \"...\", \"animated\": bool}, ...]}\n"
+            "  - 'update': {\"node_id\": \"...\", \"label\": \"...\", \"node_type\": \"...\"}\n"
+            "  - 'remove': {\"node_id\": \"...\"}\n"
+            "  - 'clear': (empty)"
         )
-
-    @function_tool(description=(
-        "Shortcut: build and immediately display a complete linear flow "
-        "from a list of step labels. Clears any existing scene first. "
-        "First and last steps become 'terminal' nodes; all others are 'process'. "
-        "layout: 'vertical' | 'horizontal' | 'circular'."
-    ))
-    async def create_flow(
+    )
+    async def scene_tool(
         self,
         context: RunContext,
-        steps: list[str],
-        layout: str = "vertical",
+        action: str,
+        payload_json: str = "",
     ) -> str:
-        self.scene.clear()
-        self._reveal_index = 0
-        node_ids: list[str] = []
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+        except Exception as e:
+            return f"Error: Invalid payload_json format. Must be a valid JSON string: {e}"
 
-        for i, label in enumerate(steps):
-            nid   = f"n{i}"
-            ntype = "terminal" if (i == 0 or i == len(steps) - 1) else "process"
-            self.scene.add_node(nid, ntype, label)
-            node_ids.append(nid)
+        action = action.strip()
+        if action == "create_node":
+            node_id = payload.get("node_id", "")
+            node_type = payload.get("node_type", "process")
+            label = payload.get("label", "")
+            group = payload.get("group", "")
+            icon_name = payload.get("icon_name", "")
+            if not node_id or not label:
+                return "Error: node_id and label are required in payload_json for create_node."
+            self.scene.add_node(node_id, node_type, label, group=group or None, icon=icon_name or None)
+            print(f"[Scene] +node  {node_id} ({node_type}) '{label}' icon_name={icon_name!r}")
+            return f"Node '{node_id}' added to scene."
 
-        for i in range(len(node_ids) - 1):
-            self.scene.add_edge(f"e{i}", node_ids[i], node_ids[i + 1])
+        elif action == "create_edge":
+            source_id = payload.get("source_id", "")
+            target_id = payload.get("target_id", "")
+            label = payload.get("label", "")
+            style = payload.get("style", "solid")
+            animated = payload.get("animated", False)
+            if not source_id or not target_id:
+                return "Error: source_id and target_id are required in payload_json for create_edge."
+            edge_id = f"e_{source_id}__{target_id}"
+            self.scene.add_edge(edge_id, source_id, target_id, label, style, animated)
+            print(f"[Scene] +edge  {source_id} -> {target_id}")
+            return f"Edge {source_id} -> {target_id} added."
 
-        # Close the loop for circular layouts
-        if layout == "circular" and len(node_ids) > 2:
-            self.scene.add_edge("e_close", node_ids[-1], node_ids[0], animated=True)
+        elif action == "build":
+            nodes = payload.get("nodes")
+            if nodes is None and "nodes_json" in payload:
+                try:
+                    nodes = json.loads(payload["nodes_json"])
+                except Exception as e:
+                    return f"Invalid nodes_json inside payload: {e}"
+            edges = payload.get("edges")
+            if edges is None and "edges_json" in payload:
+                try:
+                    edges = json.loads(payload["edges_json"])
+                except Exception as e:
+                    return f"Invalid edges_json inside payload: {e}"
 
-        patch = self.scene.patch_full_render(layout=layout)
-        await self._send_patch(patch)
-        self._save_memory()
-        print(f"[Scene] flow rendered: {len(steps)} steps ({layout})")
-        return f"Flow of {len(steps)} steps rendered with layout='{layout}'."
+            if nodes is None:
+                nodes = []
+            if edges is None:
+                edges = []
 
-    @function_tool(description=(
-        "Update an existing node's label or type. "
-        "Only provide parameters you want to change."
-    ))
-    async def update_node(
-        self,
-        context: RunContext,
-        node_id: str,
-        label: str = "",
-        node_type: str = "",
-    ) -> str:
-        kwargs: dict = {}
-        if label:
-            kwargs["label"] = label
-        if node_type:
-            kwargs["type"]  = node_type
-            kwargs["shape"] = SceneManager.NODE_SHAPE.get(node_type, "rectangle")
-            kwargs["color"] = SceneManager.NODE_COLOR.get(node_type, "#a3c2fa")
-        if not kwargs:
-            return "Nothing to update — provide label or node_type."
-        result = self.scene.update_node(node_id, **kwargs)
-        return (f"Node '{node_id}' updated." if result
-                else f"Node '{node_id}' not found.")
+            for n in nodes:
+                node_id = n.get("id")
+                node_type = n.get("type", "process")
+                
+                # Swap back if LLM used "id": "process" and "node_id": "5"
+                if "node_id" in n and (not node_id or node_id in ("process", "decision", "terminal", "data", "thought", "milestone", "state", "icon", "default")):
+                    node_id = n["node_id"]
+                    if n.get("id") in ("process", "decision", "terminal", "data", "thought", "milestone", "state", "icon", "default"):
+                        node_type = n["id"]
+                
+                if not node_id:
+                    continue
 
-    @function_tool(description="Remove a node and all its connected edges from the scene.")
-    async def remove_node(self, context: RunContext, node_id: str) -> str:
-        ok = self.scene.remove_node(node_id)
-        return (f"Node '{node_id}' removed." if ok
-                else f"Node '{node_id}' not found.")
+                self.scene.add_node(
+                    str(node_id),
+                    str(node_type),
+                    n.get("label", ""),
+                    group=n.get("group") or None,
+                    icon=n.get("icon_name") or None,
+                )
+                print(f"[Scene] +node  {node_id} ({node_type}) '{n.get('label', '')}'")
+            for e in edges:
+                edge_id = f"e_{e['source']}__{e['target']}"
+                self.scene.add_edge(
+                    edge_id,
+                    e["source"],
+                    e["target"],
+                    e.get("label", ""),
+                    e.get("style", "solid"),
+                    e.get("animated", False),
+                )
+                print(f"[Scene] +edge  {e['source']} -> {e['target']}")
+            print(f"[Scene] build_scene: {len(nodes)} nodes, {len(edges)} edges")
+            return (
+                f"Scene built: {len(nodes)} nodes, {len(edges)} edges. "
+                "Now call render_scene(layout=..., progressive=True)."
+            )
+
+        elif action == "update":
+            node_id = payload.get("node_id", "")
+            label = payload.get("label", "")
+            node_type = payload.get("node_type", "")
+            if not node_id:
+                return "Error: node_id is required in payload_json for update."
+            kwargs: dict = {}
+            if label:
+                kwargs["label"] = label
+            if node_type:
+                kwargs["type"]  = node_type
+            if not kwargs:
+                return "Nothing to update — provide label or node_type in payload_json."
+            result = self.scene.update_node(node_id, **kwargs)
+            return (f"Node '{node_id}' updated." if result
+                    else f"Node '{node_id}' not found.")
+
+        elif action == "remove":
+            node_id = payload.get("node_id", "")
+            if not node_id:
+                return "Error: node_id is required in payload_json for remove."
+            ok = self.scene.remove_node(node_id)
+            return (f"Node '{node_id}' removed." if ok
+                    else f"Node '{node_id}' not found.")
+
+        elif action == "clear":
+            self.scene.clear()
+            patch = self.scene.patch_clear()
+            await send_action(self.room, patch)
+            self._reveal_index = 0
+            print("[Scene] cleared")
+            return "Canvas cleared."
+
+        else:
+            return f"Error: Unknown action '{action}' for scene tool."
+
+
 
     # ==================================================================
     # PHASE 3 — RENDERING TOOLS
@@ -1014,6 +824,12 @@ class TutorAgent(Agent):
         patch = self.scene.patch_clear()
         await send_action(self.room, patch)
         self._reveal_index = 0
+
+        # Close any active widget panel when clearing the scene
+        if self._active_widget:
+            self._active_widget = None
+            await self._send_raw({"type": "widget_patch", "config": None})
+
         print("[Scene] cleared")
         return "Canvas cleared."
 
@@ -1092,237 +908,227 @@ class TutorAgent(Agent):
             "That call will return 'ALL DONE'."
         )
 
-    @function_tool(description=(
-        "Highlight one node to draw the student's attention. "
-        "All other nodes return to their default appearance automatically."
-    ))
-    async def highlight_node(self, context: RunContext, node_id: str) -> str:
-        if node_id not in self.scene._nodes:
-            return f"Node '{node_id}' not found in scene."
-        patch = self.scene.patch_highlight(node_id, reset_others=True)
-        await self._send_patch(patch)
-        return f"Node '{node_id}' highlighted."
+    @function_tool(
+        name="visual",
+        description=(
+            "Apply visual styling changes (highlight, dim, reset, animate) to nodes/edges on the whiteboard canvas.\n"
+            "action: 'highlight' | 'dim' | 'reset' | 'animate'\n"
+            "node_id: ID of the target node (required for highlight and dim)\n"
+            "edge_id: ID of the target edge (required for animate)"
+        )
+    )
+    async def visual_tool(
+        self,
+        context: RunContext,
+        action: str,
+        node_id: str = "",
+        edge_id: str = "",
+    ) -> str:
+        action = action.strip()
+        if action == "highlight":
+            if not node_id:
+                return "Error: node_id is required for highlight action."
+            if node_id not in self.scene._nodes:
+                return f"Node '{node_id}' not found in scene."
+            patch = self.scene.patch_highlight(node_id, reset_others=True)
+            await self._send_patch(patch)
+            return f"Node '{node_id}' highlighted."
 
-    @function_tool(description=(
-        "Dim all nodes except one to focus the student's attention entirely "
-        "on that node. Call reset_styles() when done."
-    ))
-    async def dim_except(self, context: RunContext, node_id: str) -> str:
-        if node_id not in self.scene._nodes:
-            return f"Node '{node_id}' not found in scene."
-        patch = self.scene.patch_dim_all_except(node_id)
-        await self._send_patch(patch)
-        return f"All nodes dimmed except '{node_id}'."
+        elif action == "dim":
+            if not node_id:
+                return "Error: node_id is required for dim action."
+            if node_id not in self.scene._nodes:
+                return f"Node '{node_id}' not found in scene."
+            patch = self.scene.patch_dim_all_except(node_id)
+            await self._send_patch(patch)
+            return f"All nodes dimmed except '{node_id}'."
 
-    @function_tool(description=(
-        "Restore all nodes and edges to their default (unhighlighted, undimmed) appearance."
-    ))
-    async def reset_styles(self, context: RunContext) -> str:
-        patch = self.scene.patch_reset_styles()
-        await self._send_patch(patch)
-        return "All styles reset to default."
+        elif action == "reset":
+            patch = self.scene.patch_reset_styles()
+            await self._send_patch(patch)
+            return "All styles reset to default."
 
-    @function_tool(description=(
-        "Animate an edge to show data / control flow moving along it. "
-        "edge_id must match an edge previously added with create_edge."
-    ))
-    async def animate_edge(self, context: RunContext, edge_id: str) -> str:
-        if edge_id not in self.scene._edges:
-            return f"Edge '{edge_id}' not found in scene."
-        patch = self.scene.patch_animate_edge(edge_id)
-        await self._send_patch(patch)
-        return f"Edge '{edge_id}' animated."
+        elif action == "animate":
+            if not edge_id:
+                return "Error: edge_id is required for animate action."
+            if edge_id not in self.scene._edges:
+                return f"Edge '{edge_id}' not found in scene."
+            patch = self.scene.patch_animate_edge(edge_id)
+            await self._send_patch(patch)
+            return f"Edge '{edge_id}' animated."
+
+        else:
+            return f"Error: Unknown action '{action}' for visual tool."
+
+
 
 
     # ==================================================================
     # WIDGET TOOLS — Interactive side-panel visualisations
     # ==================================================================
 
-    @function_tool(description=(
-        "Show an interactive widget in the side panel next to the diagram. "
-        "Use whenever the topic involves a quantitative formula the student can "
-        "explore (e.g. simple interest, Ohm's law, kinematics, compound growth, "
-        "wave frequency). The widget renders a live chart whose values update in "
-        "real time as the student drags sliders. "
-        "One widget is shown at a time — calling show_widget replaces any previous one. "
-        "\n\n"
-        "widget_type: 'line_chart' | 'bar_chart'\n"
-        "config_json: JSON string describing the widget. Schema:\n"
-        "{\n"
-        "  id: str,           // unique slug e.g. 'simple_interest'\n"
-        "  title: str,        // panel header e.g. 'Simple Interest Explorer'\n"
-        "  type: 'line_chart' | 'bar_chart',\n"
-        "  formula: str,      // JS expression evaluated on the frontend\n"
-        "                     // e.g. 'P * R * T / 100' or 'P * Math.pow(1+R/100, T)'\n"
-        "  x_var: str,        // which variable sweeps the x-axis (line_chart only)\n"
-        "  x_label: str,      // x-axis label\n"
-        "  y_label: str,      // y-axis label\n"
-        "  result_label: str, // live result label below chart\n"
-        "  result_unit: str,  // unit suffix for result\n"
-        "  result_decimals: int,\n"
-        "  variables: [       // ALL variables in the formula\n"
-        "    {\n"
-        "      name: str,     // must match variable name in formula exactly\n"
-        "      label: str,    // human-readable slider label\n"
-        "      min: number,\n"
-        "      max: number,\n"
-        "      default: number,\n"
-        "      step: number,\n"
-        "      unit: str,     // optional unit suffix on slider value\n"
-        "      decimals: int  // decimal places shown on slider\n"
-        "    }\n"
-        "  ],\n"
-        "  // bar_chart only:\n"
-        "  categories: [{ label: str, formula: str, vars: {...} }]\n"
-        "}\n\n"
-        "Examples:\n"
-        "  Simple Interest: formula='P*R*T/100', x_var='T', vars P,R,T\n"
-        "  Ohm's Law:       formula='V/R',       x_var='V', vars V,R\n"
-        "  Kinetic Energy:  formula='0.5*m*v*v', x_var='v', vars m,v\n"
-        "  Compound Growth: formula='P*Math.pow(1+R/100,T)', x_var='T', vars P,R,T"
-    ))
-    async def show_widget(
+    @function_tool(
+        name="widget",
+        description=(
+            "Manage interactive widgets shown in the side panel.\n"
+            "action: 'show' | 'close'\n"
+            "widget_type: 'line_chart' | 'bar_chart' (required for show)\n"
+            "config_json: JSON configuration string for the widget (required for show)"
+        )
+    )
+    async def widget_tool(
         self,
         context: RunContext,
-        widget_type: str,
-        config_json: str,
+        action: str,
+        widget_type: str = "",
+        config_json: str = "",
     ) -> str:
-        import json as _json
-        try:
-            config = _json.loads(config_json)
-        except Exception as e:
-            return f"Invalid config_json: {e}"
+        action = action.strip()
+        if action == "show":
+            if not widget_type:
+                return "Error: widget_type is required for show action."
+            if not config_json:
+                return "Error: config_json is required for show action."
+            try:
+                config = json.loads(config_json)
+            except Exception as e:
+                return f"Error: Invalid config_json format: {e}"
 
-        config["type"] = widget_type
-        self._active_widget = config
+            config["type"] = widget_type
+            self._active_widget = config
 
-        patch = {
-            "type":   "widget_patch",
-            "config": config,
-        }
-        await self._send_raw(patch)
-        print(f"[Widget] showing '{config.get('id','?')}' ({widget_type})")
-        return (
-            f"Widget '{config.get('title','widget')}' shown in side panel. "
-            "The student can now drag sliders to explore the formula interactively. "
-            "Explain the formula and what the student should notice as they change values."
-        )
+            patch = {
+                "type":   "widget_patch",
+                "config": config,
+            }
+            await self._send_raw(patch)
+            print(f"[Widget] showing '{config.get('id','?')}' ({widget_type})")
+            return (
+                f"Widget '{config.get('title','widget')}' shown in side panel. "
+                "The student can now drag sliders to explore the formula interactively. "
+                "Explain the formula and what the student should notice as they change values."
+            )
 
-    @function_tool(description=(
-        "Close/hide the interactive widget panel. "
-        "Call when moving to a new topic, or when the student asks to dismiss it."
-    ))
-    async def close_widget(self, context: RunContext) -> str:
-        self._active_widget = None
-        await self._send_raw({"type": "widget_patch", "config": None})
-        print("[Widget] closed")
-        return "Widget panel closed."
+        elif action == "close":
+            self._active_widget = None
+            await self._send_raw({"type": "widget_patch", "config": None})
+            print("[Widget] closed")
+            return "Widget panel closed."
+
+        else:
+            return f"Error: Unknown action '{action}' for widget tool."
+
+
 
     # ==================================================================
     # PHASE 7 — VISUAL MEMORY TOOLS
     # ==================================================================
 
-    @function_tool(description=(
-        "Restore a previous lesson diagram. "
-        "steps=1 means the immediately previous scene, "
-        "steps=2 means two back, etc. "
-        "Use when the student says 'go back', 'show me the previous diagram', etc."
-    ))
-    async def go_back(self, context: RunContext, steps: int = 1) -> str:
-        if not self.memory._history:
-            return "No previous diagrams in memory."
-
-        target = self.memory.nth_from_last(steps + 1)  # +1: skip the current one
-        if target is None:
-            target = self.memory._history[0]
-
-        scene_data = target["snapshot"]
-        layout     = scene_data.get("metadata", {}).get("layout", "vertical")
-
-        # Restore scene state from snapshot
-        self.scene.clear()
-        for nid, node in scene_data.get("nodes", {}).items():
-            self.scene._nodes[nid] = dict(node)
-            self.scene._node_order.append(nid)
-        for eid, edge in scene_data.get("edges", {}).items():
-            self.scene._edges[eid] = dict(edge)
-            self.scene._edge_order.append(eid)
-        self.scene._groups   = dict(scene_data.get("groups", {}))
-        self.scene._metadata = dict(scene_data.get("metadata", {}))
-        self._reveal_index   = len(self.scene._node_order)
-
-        patch = self.scene.patch_full_render(layout=layout)
-        await self._send_patch(patch)
-        print(f"[Memory] restored: '{target['label']}'")
-        return f"Restored diagram: '{target['label']}'."
-
-    @function_tool(description=(
-        "Display two previously saved diagrams side by side for comparison. "
-        "label_a / label_b: snapshot labels (use all_memory_labels to list them). "
-        "Leave blank to compare the two most recent diagrams automatically."
-    ))
-    async def compare_scenes(
+    @function_tool(
+        name="memory",
+        description=(
+            "Access visual memory to navigate back, compare previous scenes, or list saved snapshots.\n"
+            "action: 'back' | 'compare' | 'list'\n"
+            "steps: number of steps to go back (default is 1)\n"
+            "label_a: snapshot label A for comparison (optional)\n"
+            "label_b: snapshot label B for comparison (optional)"
+        )
+    )
+    async def memory_tool(
         self,
         context: RunContext,
+        action: str,
+        steps: int = 1,
         label_a: str = "",
         label_b: str = "",
     ) -> str:
-        history = self.memory._history
-        if len(history) < 2:
-            return "Need at least two saved diagrams to compare."
+        action = action.strip()
+        if action == "back":
+            if not self.memory._history:
+                return "No previous diagrams in memory."
 
-        snap_a = self.memory.get_by_label(label_a) if label_a else history[-1]
-        snap_b = self.memory.get_by_label(label_b) if label_b else history[-2]
+            target = self.memory.nth_from_last(steps + 1)  # +1: skip the current one
+            if target is None:
+                target = self.memory._history[0]
 
-        if not snap_a or not snap_b:
-            return "Could not find one or both snapshots. Check labels with all_memory_labels."
+            scene_data = target["snapshot"]
+            layout     = scene_data.get("metadata", {}).get("layout", "vertical")
 
-        # Build a combined side-by-side scene with prefixed IDs
-        combined = SceneManager()
-        combined._metadata = {"layout": "horizontal", "diagram_type": "comparison"}
+            # Restore scene state from snapshot
+            self.scene.clear()
+            for nid, node in scene_data.get("nodes", {}).items():
+                self.scene._nodes[nid] = dict(node)
+                self.scene._node_order.append(nid)
+            for eid, edge in scene_data.get("edges", {}).items():
+                self.scene._edges[eid] = dict(edge)
+                self.scene._edge_order.append(eid)
+            self.scene._groups   = dict(scene_data.get("groups", {}))
+            self.scene._metadata = dict(scene_data.get("metadata", {}))
+            self._reveal_index   = len(self.scene._node_order)
 
-        for nid, node in snap_a["snapshot"].get("nodes", {}).items():
-            n     = dict(node)
-            n["id"] = f"A_{nid}"
-            combined._nodes[n["id"]] = n
-            combined._node_order.append(n["id"])
+            patch = self.scene.patch_full_render(layout=layout)
+            await self._send_patch(patch)
+            print(f"[Memory] restored: '{target['label']}'")
+            return f"Restored diagram: '{target['label']}'."
 
-        for eid, edge in snap_a["snapshot"].get("edges", {}).items():
-            e           = dict(edge)
-            e["id"]     = f"A_{eid}"
-            e["source"] = f"A_{e['source']}"
-            e["target"] = f"A_{e['target']}"
-            combined._edges[e["id"]] = e
+        elif action == "compare":
+            history = self.memory._history
+            if len(history) < 2:
+                return "Need at least two saved diagrams to compare."
 
-        for nid, node in snap_b["snapshot"].get("nodes", {}).items():
-            n     = dict(node)
-            n["id"] = f"B_{nid}"
-            combined._nodes[n["id"]] = n
-            combined._node_order.append(n["id"])
+            snap_a = self.memory.get_by_label(label_a) if label_a else history[-1]
+            snap_b = self.memory.get_by_label(label_b) if label_b else history[-2]
 
-        for eid, edge in snap_b["snapshot"].get("edges", {}).items():
-            e           = dict(edge)
-            e["id"]     = f"B_{eid}"
-            e["source"] = f"B_{e['source']}"
-            e["target"] = f"B_{e['target']}"
-            combined._edges[e["id"]] = e
+            if not snap_a or not snap_b:
+                return "Could not find one or both snapshots. Check labels with all_memory_labels (via memory(action='list'))."
 
-        patch = combined.patch_full_render(layout="horizontal")
-        await self._send_patch(patch)
-        return (
-            f"Comparing '{snap_a['label']}' (left) "
-            f"vs '{snap_b['label']}' (right)."
-        )
+            # Build a combined side-by-side scene with prefixed IDs
+            combined = SceneManager()
+            combined._metadata = {"layout": "horizontal", "diagram_type": "comparison"}
 
-    @function_tool(description=(
-        "List the labels of all saved lesson diagrams in visual memory. "
-        "Use this to find the right label for go_back or compare_scenes."
-    ))
-    async def all_memory_labels(self, context: RunContext) -> str:
-        labels = self.memory.all_labels()
-        if not labels:
-            return "No diagrams saved yet."
-        return "Saved diagrams: " + ", ".join(labels)
+            for nid, node in snap_a["snapshot"].get("nodes", {}).items():
+                n     = dict(node)
+                n["id"] = f"A_{nid}"
+                combined._nodes[n["id"]] = n
+                combined._node_order.append(n["id"])
+
+            for eid, edge in snap_a["snapshot"].get("edges", {}).items():
+                e           = dict(edge)
+                e["id"]     = f"A_{eid}"
+                e["source"] = f"A_{e['source']}"
+                e["target"] = f"A_{e['target']}"
+                combined._edges[e["id"]] = e
+
+            for nid, node in snap_b["snapshot"].get("nodes", {}).items():
+                n     = dict(node)
+                n["id"] = f"B_{nid}"
+                combined._nodes[n["id"]] = n
+                combined._node_order.append(n["id"])
+
+            for eid, edge in snap_b["snapshot"].get("edges", {}).items():
+                e           = dict(edge)
+                e["id"]     = f"B_{eid}"
+                e["source"] = f"B_{e['source']}"
+                e["target"] = f"B_{e['target']}"
+                combined._edges[e["id"]] = e
+
+            patch = combined.patch_full_render(layout="horizontal")
+            await self._send_patch(patch)
+            return (
+                f"Comparing '{snap_a['label']}' (left) "
+                f"vs '{snap_b['label']}' (right)."
+            )
+
+        elif action == "list":
+            labels = self.memory.all_labels()
+            if not labels:
+                return "No diagrams saved yet."
+            return "Saved diagrams: " + ", ".join(labels)
+
+        else:
+            return f"Error: Unknown action '{action}' for memory tool."
+
+
 
 
 # ============================================================
@@ -1334,7 +1140,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     vad     = silero.VAD.load()
     stt     = deepgram.STT(model="nova-2")
-    llm     = openai.LLM(model=os.getenv("LLM_CHOICE", "gpt-4o-mini"))
+    llm     = openai.LLM(model=os.getenv("LLM_CHOICE", "gpt-4.1-mini"))
     tts     = deepgram.TTS(model="aura-asteria-en")
 
     session = AgentSession(
@@ -1464,7 +1270,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     f"The student typed: '{msg}'.\n\n"
                     "If the student says 'next', 'continue', or asks about the next step, "
                     "call reveal_next_node() to advance the diagram.\n\n"
-                    "If they ask to go back or compare, use go_back() or compare_scenes().\n\n"
+                    "If they ask to go back or compare, use memory(action='back') or memory(action='compare').\n\n"
                     "Otherwise, respond conversationally or use other tools as needed."
                 )
                 _reply_queue.put_nowait(instruction)
