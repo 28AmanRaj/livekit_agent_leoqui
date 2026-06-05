@@ -428,7 +428,14 @@
         </div>
         <div>
             <button id="connectBtn"    class="btn btn-primary">Join Session</button>
+            <button id="cameraBtn"     class="btn btn-outline" style="margin-bottom:0.5rem;" disabled>Start Camera</button>
             <button id="disconnectBtn" class="btn btn-outline" disabled>End Session</button>
+        </div>
+
+        <!-- Local Camera Preview -->
+        <div id="camera-preview-wrap" style="display: none; background: rgba(0,0,0,0.2); border-radius: 0.75rem; border: 1px solid var(--border); overflow: hidden; position: relative; aspect-ratio: 4/3; margin-bottom: 0.5rem;">
+            <video id="local-video" autoplay playsinline muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+            <div style="position: absolute; bottom: 0.5rem; left: 0.5rem; background: rgba(0,0,0,0.6); padding: 0.2rem 0.4rem; border-radius: 0.25rem; font-size: 0.6rem; color: #fff;">Camera Preview</div>
         </div>
 
         <!-- Live audio waveform -->
@@ -2015,6 +2022,7 @@ function detachWaveform() {
 
 // ── LiveKit wiring ────────────────────────────────────────────────────────
 const connectBtn        = document.getElementById("connectBtn");
+const cameraBtn         = document.getElementById("cameraBtn");
 const disconnectBtn     = document.getElementById("disconnectBtn");
 const statusText        = document.getElementById("status-text");
 const connectionState   = document.getElementById("connection-state");
@@ -2022,8 +2030,51 @@ const chatMessages      = document.getElementById("chat-messages");
 const chatInput         = document.getElementById("chat-input");
 const sendBtn           = document.getElementById("sendBtn");
 const speakingIndicator = document.getElementById("speaking-indicator");
+const localVideo        = document.getElementById("local-video");
+const cameraPreviewWrap = document.getElementById("camera-preview-wrap");
 
+let _cameraEnabled = false;
 let _thinkingEl = null;
+
+async function toggleCamera() {
+    if (!window._lkRoom) return;
+    try {
+        _cameraEnabled = !_cameraEnabled;
+        cameraBtn.disabled = true;
+        
+        await window._lkRoom.localParticipant.setCameraEnabled(_cameraEnabled);
+        
+        if (_cameraEnabled) {
+            cameraBtn.textContent = "Stop Camera";
+            cameraBtn.classList.remove("btn-outline");
+            cameraBtn.classList.add("btn-primary");
+            cameraPreviewWrap.style.display = "block";
+            
+            // Attach local video track
+            for (const pub of window._lkRoom.localParticipant.videoTrackPublications.values()) {
+                if (pub.track) {
+                    pub.track.attach(localVideo);
+                }
+            }
+        } else {
+            cameraBtn.textContent = "Start Camera";
+            cameraBtn.classList.add("btn-outline");
+            cameraBtn.classList.remove("btn-primary");
+            cameraPreviewWrap.style.display = "none";
+            localVideo.srcObject = null;
+        }
+    } catch (err) {
+        console.error("[Camera]", err);
+        _cameraEnabled = false;
+        cameraBtn.textContent = "Start Camera";
+        cameraBtn.classList.add("btn-outline");
+        cameraBtn.classList.remove("btn-primary");
+        cameraPreviewWrap.style.display = "none";
+        localVideo.srcObject = null;
+    } finally {
+        cameraBtn.disabled = false;
+    }
+}
 
 function showThinkingIndicator() {
     if (_thinkingEl) return; // already showing
@@ -2069,6 +2120,7 @@ async function connect() {
             connectionState.textContent = "Connected (Microphone Active)";
             connectionState.style.color = "var(--primary)";
             disconnectBtn.disabled = false;
+            cameraBtn.disabled     = false;
             chatInput.disabled     = false;
             sendBtn.disabled       = false;
         });
@@ -2078,6 +2130,13 @@ async function connect() {
             connectionState.textContent = "Ready to Join";
             connectionState.style.color = "";
             connectBtn.disabled    = false;
+            cameraBtn.disabled     = true;
+            cameraBtn.textContent  = "Start Camera";
+            cameraBtn.classList.add("btn-outline");
+            cameraBtn.classList.remove("btn-primary");
+            cameraPreviewWrap.style.display = "none";
+            localVideo.srcObject   = null;
+            _cameraEnabled         = false;
             disconnectBtn.disabled = true;
             chatInput.disabled     = true;
             sendBtn.disabled       = true;
@@ -2182,6 +2241,7 @@ document.getElementById("widget-close").addEventListener("click", () => {
 });
 
 connectBtn.addEventListener("click",   connect);
+cameraBtn.addEventListener("click",    toggleCamera);
 disconnectBtn.addEventListener("click", disconnect);
 sendBtn.addEventListener("click",      sendMessage);
 chatInput.addEventListener("keypress", e => { if (e.key === "Enter") sendMessage(); });

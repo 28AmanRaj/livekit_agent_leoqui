@@ -2,6 +2,7 @@ import asyncio
 import os
 import uuid
 import json
+import logging
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -10,7 +11,27 @@ from livekit.agents import AgentSession, JobContext, Agent, RunContext, StopResp
 from livekit.plugins import deepgram, openai, silero
 from livekit.agents.llm import function_tool
 
+# Import custom services
+from services.video_context import VideoContextService
+from services.vision_analysis import VisionAnalysisService
+
+# Set up logging
+logger = logging.getLogger("tutor_agent")
+
 load_dotenv(".env")
+
+
+def get_conversation_history_str(chat_ctx) -> str:
+    """Helper to convert ChatContext messages to a single string transcript."""
+    lines = []
+    for msg in chat_ctx.items:
+        if not hasattr(msg, "role") or not hasattr(msg, "text_content"):
+            continue
+        role = str(msg.role).split('.')[-1].lower()
+        content = msg.text_content or ""
+        if content.strip():
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -474,6 +495,15 @@ You must PROACTIVELY design and show an interactive widget whenever the topic in
   • Node Icons: Use lowercase, hyphen-separated MDI slugs (e.g. 'leaf', 'flask', 'cpu-64-bit', 'database', 'dna', 'brain', 'heart-pulse'). Use "" if no icon fits. NEVER embed emojis in label strings.
   • Node Types: process, decision, terminal, data, thought, milestone, state, icon.
   • Visual Memory: Use memory(action='back') or memory(action='compare') if the student asks to go back/compare.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. VISUAL SOLUTION CHECKING PROTOCOL (ON-DEMAND)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When the student explicitly requests to check their work/answer, asks if they are correct, asks "what did I do wrong?", or says "look at this" / "can you see my solution":
+  1. Always call check_student_work() to capture their camera frame and analyze their solution using GPT Vision.
+  2. The tool returns a structured JSON result. Read it, interpret the feedback, and respond to the student conversationally with a natural, encouraging tutoring hint.
+  3. Do NOT read the raw JSON output directly to the student. Explain the mistakes and hints in your own friendly words.
+  4. Call update_lesson_state(current_problem=...) whenever you present a new problem/question, so that the backend state is correctly synchronized before the student asks you to check their work.
 """
 
 
@@ -496,6 +526,18 @@ class TutorAgent(Agent):
         self._active_widget: dict | None = None
         # Phase 7: current topic label
         self._current_topic: str = ""
+
+        # Visual Solution Checking (Camera) State
+        self._current_problem: str = ""
+        self._current_lesson: str = ""
+        self._attempt_count: int = 0
+        self._last_hint: str = ""
+        self._last_visual_analysis: dict = {}
+        self._grade_level: str = "Middle School"
+
+        # Services
+        self._video_context_service: Optional[VideoContextService] = None
+        self._vision_analysis_service: Optional[VisionAnalysisService] = None
 
     # -- greeting ----------------------------------------------------------
 
@@ -597,6 +639,119 @@ class TutorAgent(Agent):
             "Now build the scene with scene(action='build') or scene(action='create_node'), "
             "then call render_scene."
         )
+
+    # ==================================================================
+    # Visual Solution Checking (Camera) Tools
+    # ==================================================================
+
+    @function_tool(description=(
+        "Update the current lesson state with the active problem/question, "
+        "lesson description, or grade level. Call this whenever you present a new problem."
+    ))
+    async def update_lesson_state(
+        self,
+        context: RunContext,
+        current_problem: str,
+        current_lesson: str = "",
+        grade_level: str = "Middle School",
+    ) -> str:
+        self._current_problem = current_problem
+        if current_lesson:
+            self._current_lesson = current_lesson
+        self._grade_level = grade_level
+        self._attempt_count = 0
+        self._last_hint = ""
+        self._last_visual_analysis = {}
+        print(f"[State] Problem updated: {current_problem!r} Grade: {grade_level}")
+        return f"Lesson state updated. Current problem is now: '{current_problem}'"
+
+    @function_tool(description=(
+        "Capture the student's camera stream and check their handwritten work "
+        "or answer for the current problem. Call this on-demand when the student "
+        "asks to check their work, ask if they are correct, or show their solution."
+    ))
+    async def check_student_work(self, context: RunContext) -> str:
+        if not self._video_context_service or not self._vision_analysis_service:
+            return json.dumps({
+                "correct": False,
+                "confidence": 0.0,
+                "feedback": "Visual checking services are not initialized.",
+                "identified_mistakes": [],
+                "next_hint": None
+            })
+
+        # Find the student participant ID (first remote participant)
+        student_id = "student"
+        for p in self.room.remote_participants.values():
+            student_id = p.identity
+            break
+
+        print(f"[Vision] Triggered check_student_work for student_id={student_id!r}")
+        try:
+            # 1. Capture the latest frame
+            captured_frame = await self._video_context_service.capture_current_frame(student_id)
+        except Exception as e:
+            print(f"[Vision] Capture failed: {e}")
+            return json.dumps({
+                "correct": False,
+                "confidence": 0.0,
+                "feedback": f"Failed to capture a video frame from your camera. Please ensure your camera is turned on and you are showing your work. (Error: {e})",
+                "identified_mistakes": [],
+                "next_hint": "Please turn on your camera and show your answer clearly."
+            })
+
+        # 2. Extract conversation history
+        history_str = ""
+        if self._session and self._session.history:
+            history_str = get_conversation_history_str(self._session.history)
+
+        # Fallback: Extract current problem from history if not set
+        current_prob = self._current_problem
+        if not current_prob and self._session and self._session.history:
+            import re
+            for msg in reversed(self._session.history.items):
+                if hasattr(msg, "role") and str(msg.role).split('.')[-1].lower() == "assistant":
+                    text = msg.text_content or ""
+                    # Match equations like 3x - 4 = 11, 2x + 5 = 17, 3x+5=20, etc.
+                    match = re.search(r'(\d+\s*[a-zA-Z]\s*[\+\-\*\/]\s*\d+\s*=\s*\d+)', text)
+                    if match:
+                        current_prob = match.group(1)
+                        print(f"[Vision] Extracted active equation from history fallback: {current_prob}")
+                        self._current_problem = current_prob
+                        break
+
+        lesson_context = {
+            "topic": self._current_topic,
+            "current_question": current_prob,
+            "grade_level": self._grade_level,
+            "conversation_history": history_str,
+            "student_image": "attached_as_multimodal_data"
+        }
+
+        # 3. Analyze frame via GPT Vision
+        try:
+            result = await self._vision_analysis_service.analyze_student_work(
+                image=captured_frame.image_bytes,
+                lesson_context=lesson_context,
+                current_problem=current_prob
+            )
+            print(f"[Vision] Analysis complete: correct={result.get('correct')}")
+        except Exception as e:
+            print(f"[Vision] Analysis failed: {e}")
+            return json.dumps({
+                "correct": False,
+                "confidence": 0.0,
+                "feedback": f"Failed to analyze the image using Vision services. (Error: {e})",
+                "identified_mistakes": [],
+                "next_hint": "Please try showing your solution to the camera again."
+            })
+
+        # 4. Update session state
+        self._attempt_count += 1
+        self._last_visual_analysis = result
+        self._last_hint = result.get("next_hint") or ""
+
+        return json.dumps(result)
 
     # ==================================================================
     # PHASE 1 — SCENE BUILDING TOOLS
@@ -1152,8 +1307,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def on_transcribed(event: agents.UserInputTranscribedEvent) -> None:
-        if event.transcript.strip():
-            print(f"USER: {event.transcript}")
+        if event.transcript.strip() and event.is_final:
+            print(f"USER (FINAL): {event.transcript}")
+            asyncio.create_task(send_action(ctx.room, {
+                "type":   "chat",
+                "text":   event.transcript,
+                "sender": "user",
+            }))
 
     @session.on("conversation_item_added")
     def on_item_added(event: agents.ConversationItemAddedEvent) -> None:
@@ -1173,9 +1333,17 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=agents.AutoSubscribe.SUBSCRIBE_ALL)
     print("DEBUG: Room connected.")
 
+    # Initialize video/vision checking services
+    video_context_service = VideoContextService(ctx.room)
+    vision_analysis_service = VisionAnalysisService(api_key=os.getenv("OPENAI_API_KEY"))
+
     agent           = TutorAgent(room=ctx.room, instructions=SYSTEM_INSTRUCTIONS)
     agent._session  = session
     agent._timeline = TimelineExecutor(ctx.room, agent.scene, session)
+
+    # Bind services to agent
+    agent._video_context_service = video_context_service
+    agent._vision_analysis_service = vision_analysis_service
 
     # ROOT FIX for Bug 2: Use a sequential reply queue.
     # session.generate_reply() is not re-entrant — concurrent calls produce
