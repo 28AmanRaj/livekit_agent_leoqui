@@ -429,6 +429,7 @@
         <div>
             <button id="connectBtn"    class="btn btn-primary">Join Session</button>
             <button id="cameraBtn"     class="btn btn-outline" style="margin-bottom:0.5rem;" disabled>Start Camera</button>
+            <button id="captureBtn"    class="btn btn-outline" style="margin-bottom:0.5rem;" disabled>Capture Work</button>
             <button id="disconnectBtn" class="btn btn-outline" disabled>End Session</button>
         </div>
 
@@ -2023,6 +2024,7 @@ function detachWaveform() {
 // ── LiveKit wiring ────────────────────────────────────────────────────────
 const connectBtn        = document.getElementById("connectBtn");
 const cameraBtn         = document.getElementById("cameraBtn");
+const captureBtn        = document.getElementById("captureBtn");
 const disconnectBtn     = document.getElementById("disconnectBtn");
 const statusText        = document.getElementById("status-text");
 const connectionState   = document.getElementById("connection-state");
@@ -2049,6 +2051,7 @@ async function toggleCamera() {
             cameraBtn.classList.remove("btn-outline");
             cameraBtn.classList.add("btn-primary");
             cameraPreviewWrap.style.display = "block";
+            captureBtn.disabled = false;
             
             // Attach local video track
             for (const pub of window._lkRoom.localParticipant.videoTrackPublications.values()) {
@@ -2062,6 +2065,7 @@ async function toggleCamera() {
             cameraBtn.classList.remove("btn-primary");
             cameraPreviewWrap.style.display = "none";
             localVideo.srcObject = null;
+            captureBtn.disabled = true;
         }
     } catch (err) {
         console.error("[Camera]", err);
@@ -2071,6 +2075,7 @@ async function toggleCamera() {
         cameraBtn.classList.remove("btn-primary");
         cameraPreviewWrap.style.display = "none";
         localVideo.srcObject = null;
+        captureBtn.disabled = true;
     } finally {
         cameraBtn.disabled = false;
     }
@@ -2134,6 +2139,7 @@ async function connect() {
             cameraBtn.textContent  = "Start Camera";
             cameraBtn.classList.add("btn-outline");
             cameraBtn.classList.remove("btn-primary");
+            captureBtn.disabled    = true;
             cameraPreviewWrap.style.display = "none";
             localVideo.srcObject   = null;
             _cameraEnabled         = false;
@@ -2240,8 +2246,18 @@ document.getElementById("widget-close").addEventListener("click", () => {
     }
 });
 
+function captureWork() {
+    if (!window._lkRoom || !_cameraEnabled) return;
+    const payload = JSON.stringify({ type: "capture" });
+    window._lkRoom.localParticipant.publishData(
+        new TextEncoder().encode(payload), { reliable: true }
+    );
+    addChatMessage("Click! Capture triggered at this moment.", "user");
+}
+
 connectBtn.addEventListener("click",   connect);
 cameraBtn.addEventListener("click",    toggleCamera);
+captureBtn.addEventListener("click",   captureWork);
 disconnectBtn.addEventListener("click", disconnect);
 sendBtn.addEventListener("click",      sendMessage);
 chatInput.addEventListener("keypress", e => { if (e.key === "Enter") sendMessage(); });

@@ -12,6 +12,8 @@ dependencies = [
     "livekit-plugins-turn-detector>=1.0.0",
     "python-dotenv>=1.0.0",
     "httpx>=0.28.1",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]

@@ -1,7 +1,7 @@
-import os
 import json
+import os
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 from livekit import api
 
@@ -26,9 +26,9 @@ class LiveKitHandler(SimpleHTTPRequestHandler):
                 room_join=True,
                 room=room_name,
             ))
-            
+
             jwt_token = token.to_jwt()
-            
+
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -38,7 +38,7 @@ class LiveKitHandler(SimpleHTTPRequestHandler):
             }
             self.wfile.write(json.dumps(response).encode())
             return
-            
+
         # Default behavior serves files
         return super().do_GET()
 

@@ -1,15 +1,15 @@
 import asyncio
-import os
-import uuid
 import json
 import logging
+import os
+import uuid
 from typing import Optional
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import AgentSession, JobContext, Agent, RunContext, StopResponse
-from livekit.plugins import deepgram, openai, silero
+from livekit.agents import Agent, AgentSession, JobContext, RunContext, StopResponse
 from livekit.agents.llm import function_tool
+from livekit.plugins import deepgram, openai, silero
 
 # Import custom services
 from services.video_context import VideoContextService
@@ -538,6 +538,7 @@ class TutorAgent(Agent):
         # Services
         self._video_context_service: Optional[VideoContextService] = None
         self._vision_analysis_service: Optional[VisionAnalysisService] = None
+        self._manual_captured_frame: Optional[bytes] = None
 
     # -- greeting ----------------------------------------------------------
 
@@ -662,7 +663,10 @@ class TutorAgent(Agent):
         self._attempt_count = 0
         self._last_hint = ""
         self._last_visual_analysis = {}
-        print(f"[State] Problem updated: {current_problem!r} Grade: {grade_level}")
+        if self._video_context_service:
+            self._video_context_service.clear_buffer()
+        self._manual_captured_frame = None
+        print(f"[State] Problem updated: {current_problem!r} Grade: {grade_level}, candidate buffer and manual frame cleared.")
         return f"Lesson state updated. Current problem is now: '{current_problem}'"
 
     @function_tool(description=(
@@ -687,18 +691,47 @@ class TutorAgent(Agent):
             break
 
         print(f"[Vision] Triggered check_student_work for student_id={student_id!r}")
-        try:
-            # 1. Capture the latest frame
-            captured_frame = await self._video_context_service.capture_current_frame(student_id)
-        except Exception as e:
-            print(f"[Vision] Capture failed: {e}")
-            return json.dumps({
-                "correct": False,
-                "confidence": 0.0,
-                "feedback": f"Failed to capture a video frame from your camera. Please ensure your camera is turned on and you are showing your work. (Error: {e})",
-                "identified_mistakes": [],
-                "next_hint": "Please turn on your camera and show your answer clearly."
-            })
+
+        # Wait a short duration to allow frames captured while the user was speaking to process
+        await asyncio.sleep(1.5)
+
+        # 1. Retrieve frames for analysis
+        images_to_analyze = []
+
+        if self._manual_captured_frame:
+            print("[Vision] Using manually captured override frame.")
+            images_to_analyze = [self._manual_captured_frame]
+            self._manual_captured_frame = None
+            self._video_context_service.clear_buffer()
+        else:
+            candidates = self._video_context_service.get_top_candidates(limit=3)
+            if candidates:
+                # We have buffered frames of high quality!
+                images_to_analyze = [c["frame_bytes"] for c in candidates]
+                # Clear buffer immediately to avoid stale frames on next check
+                self._video_context_service.clear_buffer()
+                print(f"[Vision] Using {len(images_to_analyze)} frames from candidate buffer.")
+            else:
+                print("[Vision] Candidate buffer is empty. Falling back to real-time frame capture.")
+                try:
+                    # Capture the latest frame
+                    captured_frame = await self._video_context_service.capture_current_frame(student_id)
+                    images_to_analyze = [captured_frame.image_bytes]
+                except Exception as e:
+                    print(f"[Vision] Capture failed: {e}")
+                    return json.dumps({
+                        "correct": False,
+                        "confidence": 0.0,
+                        "feedback": f"Failed to capture a video frame from your camera. Please ensure your camera is turned on and you are showing your work. (Error: {e})",
+                        "identified_mistakes": [],
+                        "next_hint": "Please turn on your camera and show your answer clearly."
+                    })
+
+        # Save the images being sent to GPT Vision for debugging
+        for idx, img in enumerate(images_to_analyze):
+            with open(f"debug_eval_{idx}.jpg", "wb") as debug_file:
+                debug_file.write(img)
+        print(f"[Vision] Wrote {len(images_to_analyze)} debug evaluation image(s) to disk.")
 
         # 2. Extract conversation history
         history_str = ""
@@ -731,7 +764,7 @@ class TutorAgent(Agent):
         # 3. Analyze frame via GPT Vision
         try:
             result = await self._vision_analysis_service.analyze_student_work(
-                image=captured_frame.image_bytes,
+                images=images_to_analyze,
                 lesson_context=lesson_context,
                 current_problem=current_prob
             )
@@ -830,13 +863,13 @@ class TutorAgent(Agent):
             for n in nodes:
                 node_id = n.get("id")
                 node_type = n.get("type", "process")
-                
+
                 # Swap back if LLM used "id": "process" and "node_id": "5"
                 if "node_id" in n and (not node_id or node_id in ("process", "decision", "terminal", "data", "thought", "milestone", "state", "icon", "default")):
                     node_id = n["node_id"]
                     if n.get("id") in ("process", "decision", "terminal", "data", "thought", "milestone", "state", "icon", "default"):
                         node_type = n["id"]
-                
+
                 if not node_id:
                     continue
 
@@ -1345,6 +1378,23 @@ async def entrypoint(ctx: JobContext) -> None:
     agent._video_context_service = video_context_service
     agent._vision_analysis_service = vision_analysis_service
 
+    @session.on("user_state_changed")
+    def on_user_state_changed(event) -> None:
+        state = event.new_state
+        print(f"DEBUG: User state changed from {event.old_state} to {state}")
+        if state == "speaking":
+            print("DEBUG: Starting video context sampling...")
+            video_context_service.clear_buffer()
+            video_context_service.start_sampling()
+        elif state in ("listening", "away"):
+            print("DEBUG: Stopping video context sampling...")
+            video_context_service.stop_sampling()
+
+    @ctx.room.on("disconnected")
+    def on_disconnected():
+        print("DEBUG: Room disconnected. Stopping video context service sampling.")
+        video_context_service.stop_sampling()
+
     # ROOT FIX for Bug 2: Use a sequential reply queue.
     # session.generate_reply() is not re-entrant — concurrent calls produce
     # silent failures or stale/duplicate output.  Instead we put every user
@@ -1417,6 +1467,50 @@ async def entrypoint(ctx: JobContext) -> None:
                 print("[Widget] closed by student")
                 return
 
+            # Capture button clicked by user
+            if ptype == "capture":
+                print("[Vision] User clicked Capture Work button. Starting manual frame capture...")
+                student_id = "student"
+                for p in ctx.room.remote_participants.values():
+                    student_id = p.identity
+                    break
+
+                async def _capture_and_trigger():
+                    try:
+                        captured_frame = await video_context_service.capture_current_frame(student_id)
+                        agent._manual_captured_frame = captured_frame.image_bytes
+                        print("[Vision] Successfully captured manual override frame.")
+
+                        # Write to file for visual debugging
+                        with open("debug_capture.jpg", "wb") as debug_file:
+                            debug_file.write(captured_frame.image_bytes)
+                        print("[Vision] Wrote manual capture to debug_capture.jpg")
+
+                        # Abort current reply and queue a new request to check the work
+                        _abort_event.set()
+                        while not _reply_queue.empty():
+                            try:
+                                _reply_queue.get_nowait()
+                                _reply_queue.task_done()
+                            except asyncio.QueueEmpty:
+                                break
+
+                        instruction = (
+                            "CRITICAL: The student manually clicked the 'Capture Work' button. "
+                            "You MUST immediately call the check_student_work tool to evaluate their math work. "
+                            "Do NOT say anything else or ask them to show their work again before calling the tool."
+                        )
+                        _reply_queue.put_nowait(instruction)
+                    except Exception as ex:
+                        print(f"[Vision] Manual capture failed: {ex}")
+                        await session.say(
+                            f"Sorry, I couldn't capture a frame from your camera. Please ensure your camera is started and showing your work. (Error: {ex})",
+                            allow_interruptions=False
+                        )
+
+                asyncio.create_task(_capture_and_trigger())
+                return
+
             # Text/chat message from user
             if ptype == "chat":
                 msg = payload.get("text", "").strip()
@@ -1431,8 +1525,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
                 # Drain old pending requests — only the latest matters
                 while not _reply_queue.empty():
-                    try: _reply_queue.get_nowait(); _reply_queue.task_done()
-                    except asyncio.QueueEmpty: break
+                    try:
+                        _reply_queue.get_nowait()
+                        _reply_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
 
                 instruction = (
                     f"The student typed: '{msg}'.\n\n"
